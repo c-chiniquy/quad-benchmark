@@ -13,7 +13,7 @@ My rendering abstraction layer [iglo](https://github.com/c-chiniquy/iglo) is use
   - Indexing (with both dynamic and static index buffer)
   - Vertex pulling (with both raw and structured buffers)
   - Instancing
-- Vertex data confined to GPU (no CPU->GPU data transfers and CPU doesn't write any vertex data)
+- GPU only (no CPU->GPU data transfers and CPU doesn't write any vertex data)
 
 ## Minimum system requirements
 
