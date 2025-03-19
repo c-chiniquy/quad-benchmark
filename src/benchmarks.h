@@ -142,15 +142,68 @@ private:
 	ig::Pipeline pipeline;
 };
 
-class Benchmark_ConfinedToGPU : public Benchmark
+class Benchmark_GPUSimple : public Benchmark
 {
 public:
-	std::string GetName() const override { return "Confined to GPU only"; }
+	std::string GetName() const override { return "GPU only (Simple Batching)"; }
+
+	void Init(const ig::IGLOContext&, ig::CommandList&, const Quad* src, uint32_t numQuads) override;
+	void OnRender(const ig::IGLOContext&, ig::CommandList&, const Quad* src, uint32_t numQuads) override;
+
+private:
+	ig::Buffer vertexBuffer;
+	ig::Pipeline pipeline;
+};
+
+class Benchmark_GPUIndexing : public Benchmark
+{
+public:
+	std::string GetName() const override { return "GPU only (Indexing)"; }
+
+	void Init(const ig::IGLOContext&, ig::CommandList&, const Quad* src, uint32_t numQuads) override;
+	void OnRender(const ig::IGLOContext&, ig::CommandList&, const Quad* src, uint32_t numQuads) override;
+
+private:
+	ig::Buffer vertexBuffer;
+	ig::Buffer indexBuffer;
+	ig::Pipeline pipeline;
+};
+
+class Benchmark_GPURaw : public Benchmark
+{
+public:
+	std::string GetName() const override { return "GPU only (Raw Vertex Pulling)"; }
+
+	void Init(const ig::IGLOContext&, ig::CommandList&, const Quad* src, uint32_t numQuads) override;
+	void OnRender(const ig::IGLOContext&, ig::CommandList&, const Quad* src, uint32_t numQuads) override;
+
+private:
+	ig::Buffer rawBuffer;
+	ig::Pipeline pipeline;
+};
+
+class Benchmark_GPUStructured : public Benchmark
+{
+public:
+	std::string GetName() const override { return "GPU only (Structured Vertex Pulling)"; }
 
 	void Init(const ig::IGLOContext&, ig::CommandList&, const Quad* src, uint32_t numQuads) override;
 	void OnRender(const ig::IGLOContext&, ig::CommandList&, const Quad* src, uint32_t numQuads) override;
 
 private:
 	ig::Buffer structuredBuffer;
+	ig::Pipeline pipeline;
+};
+
+class Benchmark_GPUInstancing : public Benchmark
+{
+public:
+	std::string GetName() const override { return "GPU only (Instancing)"; }
+
+	void Init(const ig::IGLOContext&, ig::CommandList&, const Quad* src, uint32_t numQuads) override;
+	void OnRender(const ig::IGLOContext&, ig::CommandList&, const Quad* src, uint32_t numQuads) override;
+
+private:
+	ig::Buffer vertexBuffer;
 	ig::Pipeline pipeline;
 };

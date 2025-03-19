@@ -87,7 +87,11 @@ void Start()
 		benchmarks.push_back(std::move(std::make_unique<Benchmark_RawVertexPulling>()));
 		benchmarks.push_back(std::move(std::make_unique<Benchmark_StructuredVertexPulling>()));
 		benchmarks.push_back(std::move(std::make_unique<Benchmark_Instancing>()));
-		benchmarks.push_back(std::move(std::make_unique<Benchmark_ConfinedToGPU>()));
+		benchmarks.push_back(std::move(std::make_unique<Benchmark_GPUSimple>()));
+		benchmarks.push_back(std::move(std::make_unique<Benchmark_GPUIndexing>()));
+		benchmarks.push_back(std::move(std::make_unique<Benchmark_GPURaw>()));
+		benchmarks.push_back(std::move(std::make_unique<Benchmark_GPUStructured>()));
+		benchmarks.push_back(std::move(std::make_unique<Benchmark_GPUInstancing>()));
 
 		cmd.Begin();
 		{
