@@ -55,10 +55,10 @@ private:
 	ig::Pipeline pipeline;
 };
 
-class Benchmark_SimpleBatching : public Benchmark
+class Benchmark_BatchedTriangles : public Benchmark
 {
 public:
-	std::string GetName() const override { return "Simple Batching"; }
+	std::string GetName() const override { return "Batched Triangle Lists"; }
 
 	void Init(const ig::IGLOContext&, ig::CommandList&, const Quad* src, uint32_t numQuads) override;
 	void OnRender(const ig::IGLOContext&, ig::CommandList&, const Quad* src, uint32_t numQuads) override;
@@ -69,10 +69,10 @@ private:
 	ig::Pipeline pipeline;
 };
 
-class Benchmark_DynamicIndexing : public Benchmark
+class Benchmark_DynamicIndexBuffer : public Benchmark
 {
 public:
-	std::string GetName() const override { return "Dynamic Indexing"; }
+	std::string GetName() const override { return "Dynamic Index Buffer"; }
 
 	void Init(const ig::IGLOContext&, ig::CommandList&, const Quad* src, uint32_t numQuads) override;
 	void OnRender(const ig::IGLOContext&, ig::CommandList&, const Quad* src, uint32_t numQuads) override;
@@ -85,10 +85,10 @@ private:
 	ig::Pipeline pipeline;
 };
 
-class Benchmark_StaticIndexing : public Benchmark
+class Benchmark_StaticIndexBuffer : public Benchmark
 {
 public:
-	std::string GetName() const override { return "Static Indexing"; }
+	std::string GetName() const override { return "Static Index Buffer"; }
 
 	void Init(const ig::IGLOContext&, ig::CommandList&, const Quad* src, uint32_t numQuads) override;
 	void OnRender(const ig::IGLOContext&, ig::CommandList&, const Quad* src, uint32_t numQuads) override;
@@ -142,10 +142,10 @@ private:
 	ig::Pipeline pipeline;
 };
 
-class Benchmark_GPUSimple : public Benchmark
+class Benchmark_GPUTriangles : public Benchmark
 {
 public:
-	std::string GetName() const override { return "GPU only (Simple Batching)"; }
+	std::string GetName() const override { return "GPU only (Batched Triangle Lists)"; }
 
 	void Init(const ig::IGLOContext&, ig::CommandList&, const Quad* src, uint32_t numQuads) override;
 	void OnRender(const ig::IGLOContext&, ig::CommandList&, const Quad* src, uint32_t numQuads) override;
@@ -155,10 +155,10 @@ private:
 	ig::Pipeline pipeline;
 };
 
-class Benchmark_GPUIndexing : public Benchmark
+class Benchmark_GPUIndexBuffer : public Benchmark
 {
 public:
-	std::string GetName() const override { return "GPU only (Indexing)"; }
+	std::string GetName() const override { return "GPU only (Index Buffer)"; }
 
 	void Init(const ig::IGLOContext&, ig::CommandList&, const Quad* src, uint32_t numQuads) override;
 	void OnRender(const ig::IGLOContext&, ig::CommandList&, const Quad* src, uint32_t numQuads) override;
