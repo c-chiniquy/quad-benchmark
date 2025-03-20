@@ -5,14 +5,15 @@
 This project benchmarks several quad rendering methods in D3D12.
 My rendering abstraction layer [iglo](https://github.com/c-chiniquy/iglo) is used.
 
-## List of Benchmarks
+## Benchmarks
 
-- 1 Draw call per quad (slowest method)
-- Simple Batching
-- Vertex generation methods
-  - Indexing (with both dynamic and static index buffer)
-  - Vertex pulling (with both raw and structured buffers)
-  - Instancing
+- 1 Draw call per quad
+- Batched Triangle List
+- Dynamic Index Buffer
+- Static Index Buffer
+- Raw Vertex Pulling
+- Structured Vertex Pulling
+- Instancing
 - GPU only (no CPU->GPU data transfers and CPU doesn't write any vertex data)
 
 ## Minimum system requirements
