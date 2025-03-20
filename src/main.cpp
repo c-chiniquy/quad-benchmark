@@ -81,7 +81,7 @@ void Start()
 		benchmarks.clear();
 		benchmarks.push_back(std::move(std::make_unique<Benchmark_Nothing>()));
 		benchmarks.push_back(std::move(std::make_unique<Benchmark_1DrawCall>()));
-		benchmarks.push_back(std::move(std::make_unique<Benchmark_BatchedTriangles>()));
+		benchmarks.push_back(std::move(std::make_unique<Benchmark_BatchedTriangleList>()));
 		benchmarks.push_back(std::move(std::make_unique<Benchmark_DynamicIndexBuffer>()));
 		benchmarks.push_back(std::move(std::make_unique<Benchmark_StaticIndexBuffer>()));
 		benchmarks.push_back(std::move(std::make_unique<Benchmark_RawVertexPulling>()));

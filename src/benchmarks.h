@@ -55,10 +55,10 @@ private:
 	ig::Pipeline pipeline;
 };
 
-class Benchmark_BatchedTriangles : public Benchmark
+class Benchmark_BatchedTriangleList : public Benchmark
 {
 public:
-	std::string GetName() const override { return "Batched Triangle Lists"; }
+	std::string GetName() const override { return "Batched Triangle List"; }
 
 	void Init(const ig::IGLOContext&, ig::CommandList&, const Quad* src, uint32_t numQuads) override;
 	void OnRender(const ig::IGLOContext&, ig::CommandList&, const Quad* src, uint32_t numQuads) override;
@@ -145,7 +145,7 @@ private:
 class Benchmark_GPUTriangles : public Benchmark
 {
 public:
-	std::string GetName() const override { return "GPU only (Batched Triangle Lists)"; }
+	std::string GetName() const override { return "GPU only (Batched Triangle List)"; }
 
 	void Init(const ig::IGLOContext&, ig::CommandList&, const Quad* src, uint32_t numQuads) override;
 	void OnRender(const ig::IGLOContext&, ig::CommandList&, const Quad* src, uint32_t numQuads) override;

@@ -56,7 +56,7 @@ void Benchmark_1DrawCall::OnRender(const ig::IGLOContext& context, ig::CommandLi
 	}
 }
 
-void Benchmark_BatchedTriangles::Init(const ig::IGLOContext& context, ig::CommandList& cmd, const Quad* src, uint32_t numQuads)
+void Benchmark_BatchedTriangleList::Init(const ig::IGLOContext& context, ig::CommandList& cmd, const Quad* src, uint32_t numQuads)
 {
 	vertices = std::vector<Vertex>(numQuads * 6);
 	vertexBuffer.LoadAsVertexBuffer(context, sizeof(Vertex), numQuads * 6, ig::BufferUsage::Dynamic);
@@ -79,7 +79,7 @@ void Benchmark_BatchedTriangles::Init(const ig::IGLOContext& context, ig::Comman
 	pipeline.Load(context, desc);
 }
 
-void Benchmark_BatchedTriangles::OnRender(const ig::IGLOContext& context, ig::CommandList& cmd, const Quad* src, uint32_t numQuads)
+void Benchmark_BatchedTriangleList::OnRender(const ig::IGLOContext& context, ig::CommandList& cmd, const Quad* src, uint32_t numQuads)
 {
 	uint32_t currentVertex = 0;
 	for (uint32_t i = 0; i < numQuads; i++)
