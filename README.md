@@ -14,7 +14,7 @@ My rendering abstraction layer [iglo](https://github.com/c-chiniquy/iglo) is use
 - Raw Vertex Pulling
 - Structured Vertex Pulling
 - Instancing
-- GPU only (no CPU->GPU data transfers and CPU doesn't write any vertex data)
+- Rendering only (no CPU->GPU data transfers and CPU doesn't write any vertex data)
 
 ## Minimum system requirements
 
