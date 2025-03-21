@@ -188,6 +188,7 @@ void Draw()
 		cmd.SetScissorRectangle(context.GetWidth(), context.GetHeight());
 		cmd.ClearColor(context.GetBackBuffer(), ig::Colors::Red);
 
+		benchmarks.at(currentBenchmark)->OnUpdate(context, quads.data(), numQuads);
 		benchmarks.at(currentBenchmark)->OnRender(context, cmd, quads.data(), numQuads);
 
 		cmd.AddTextureBarrier(context.GetBackBuffer(), ig::SimpleBarrier::RenderTarget, ig::SimpleBarrier::Common, false);
