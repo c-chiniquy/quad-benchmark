@@ -337,7 +337,7 @@ void Benchmark_Instancing::OnRender(const ig::IGLOContext& context, ig::CommandL
 	cmd.SetPushConstants(&pushConstants, sizeof(pushConstants));
 	cmd.SetVertexBuffer(vertexBuffer);
 	cmd.SetPrimitiveTopology(ig::Primitive::TriangleStrip);
-	cmd.DrawInstanced(6, numQuads);
+	cmd.DrawInstanced(4, numQuads);
 }
 
 void Benchmark_GPUTriangles::Init(const ig::IGLOContext& context, ig::CommandList& cmd, const Quad* quad, uint32_t numQuads)
