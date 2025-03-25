@@ -546,5 +546,5 @@ void Benchmark_GPUInstancing::OnRender(const ig::IGLOContext& context, ig::Comma
 	cmd.SetPushConstants(&pushConstants, sizeof(pushConstants));
 	cmd.SetVertexBuffer(vertexBuffer);
 	cmd.SetPrimitiveTopology(ig::Primitive::TriangleStrip);
-	cmd.DrawInstanced(6, numQuads);
+	cmd.DrawInstanced(4, numQuads);
 }
