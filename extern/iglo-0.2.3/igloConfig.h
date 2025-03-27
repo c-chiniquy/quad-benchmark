@@ -12,4 +12,4 @@
 
 // Uncomment the macro below to force iglo to print to the console instead of the debug output window.
 // This is only relevant on the Windows platform.
-//#define IGLO_FORCE_CONSOLE_OUTPUT
+#define IGLO_FORCE_CONSOLE_OUTPUT
