@@ -2,7 +2,7 @@
 
 ## About the project
 
-This project benchmarks several quad rendering methods in D3D12.
+This project benchmarks several quad rendering methods in D3D12 and Vulkan.
 My rendering abstraction layer [iglo](https://github.com/c-chiniquy/iglo) is used.
 
 ## Benchmarks
