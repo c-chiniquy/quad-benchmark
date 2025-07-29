@@ -1,27 +1,44 @@
 #include "iglo.h"
 #include "benchmarks.h"
 
-// Shaders
+#ifdef IGLO_D3D12
 #include "shaders/PS_Color.h"
 #include "shaders/VS_InstancedRect.h"
 #include "shaders/VS_RawRect.h"
 #include "shaders/VS_StructuredRect.h"
 #include "shaders/VS_Triangles.h"
+#else
+#include "shaders/PS_Color_SPIRV.h"
+#include "shaders/VS_InstancedRect_SPIRV.h"
+#include "shaders/VS_RawRect_SPIRV.h"
+#include "shaders/VS_StructuredRect_SPIRV.h"
+#include "shaders/VS_Triangles_SPIRV.h"
+#endif
 
 #define SHADER_VS(a) ig::Shader(a, sizeof(a), "VSMain")
 #define SHADER_PS(a) ig::Shader(a, sizeof(a), "PSMain")
 
-void UpdateQuadsCPU(const ig::IGLOContext& context, Quad* quads_CPU, uint32_t numQuads)
+void UpdateQuadsCPU(ig::Extent2D viewExtent, Quad* quads_CPU, uint32_t numQuads)
 {
 	// Move quads to the right
 	for (uint32_t i = 0; i < numQuads; i++)
 	{
 		quads_CPU[i].x += 1.0f;
-		if (quads_CPU[i].x > context.GetWidth()) quads_CPU[i].x -= (float)context.GetWidth();
+		if (quads_CPU[i].x > viewExtent.width) quads_CPU[i].x -= (float)viewExtent.width;
+	}
+}
+void UpdateStructuredQuadsCPU(ig::Extent2D viewExtent, StructuredQuad* quads_CPU, uint32_t numQuads)
+{
+	// Move quads to the right
+	for (uint32_t i = 0; i < numQuads; i++)
+	{
+		quads_CPU[i].x += 1.0f;
+		if (quads_CPU[i].x > viewExtent.width) quads_CPU[i].x -= (float)viewExtent.width;
 	}
 }
 
-void Benchmark_1DrawCall::Init(const ig::IGLOContext& context, ig::CommandList& cmd, const Quad* quad, uint32_t numQuads)
+Benchmark_1DrawCall::Benchmark_1DrawCall(const ig::IGLOContext& context, ig::CommandList& cmd, const BenchmarkParams& params)
+	: Benchmark(context, cmd, params)
 {
 	const std::vector<ig::VertexElement> vertexLayout =
 	{
@@ -36,40 +53,41 @@ void Benchmark_1DrawCall::Init(const ig::IGLOContext& context, ig::CommandList& 
 	desc.renderTargetDesc = context.GetBackBufferRenderTargetDesc();
 	desc.PS = SHADER_PS(g_PS_Color);
 	desc.VS = SHADER_VS(g_VS_Triangles);
-	desc.primitiveTopology = ig::Primitive::TriangleList;
+	desc.primitiveTopology = ig::PrimitiveTopology::TriangleList;
 	desc.vertexLayout = vertexLayout;
 	pipeline.Load(context, desc);
 }
 
-void Benchmark_1DrawCall::OnRender(const ig::IGLOContext& context, ig::CommandList& cmd, const Quad* quad, uint32_t numQuads)
+void Benchmark_1DrawCall::OnRender(ig::CommandList& cmd)
 {
 	PushConstants pushConstants;
-	pushConstants.screenSize = ig::Vector2((float)context.GetWidth(), (float)context.GetHeight());
+	pushConstants.screenSize = ig::Vector2((float)params.viewExtent.width, (float)params.viewExtent.height);
 
 	cmd.SetPipeline(pipeline);
 	cmd.SetPushConstants(&pushConstants, sizeof(pushConstants));
-	cmd.SetPrimitiveTopology(ig::Primitive::TriangleList);
 
-	for (uint32_t i = 0; i < numQuads; i++)
+	for (uint32_t i = 0; i < params.numQuads; i++)
 	{
+		const Quad& q = params.quads[i];
 		Vertex data[6] =
 		{
-			{quad[i].x, quad[i].y, quad[i].color},
-			{quad[i].x + quad[i].width, quad[i].y, quad[i].color},
-			{quad[i].x, quad[i].y + quad[i].height, quad[i].color},
-			{quad[i].x, quad[i].y + quad[i].height, quad[i].color},
-			{quad[i].x + quad[i].width, quad[i].y, quad[i].color},
-			{quad[i].x + quad[i].width, quad[i].y + quad[i].height, quad[i].color},
+			{q.x, q.y, q.color},
+			{q.x + q.width, q.y, q.color},
+			{q.x, q.y + q.height, q.color},
+			{q.x, q.y + q.height, q.color},
+			{q.x + q.width, q.y, q.color},
+			{q.x + q.width, q.y + q.height, q.color},
 		};
 		cmd.SetTempVertexBuffer(&data, sizeof(data), sizeof(Vertex));
 		cmd.Draw(6);
 	}
 }
 
-void Benchmark_BatchedTriangleList::Init(const ig::IGLOContext& context, ig::CommandList& cmd, const Quad* quad, uint32_t numQuads)
+Benchmark_BatchedTriangleList::Benchmark_BatchedTriangleList(const ig::IGLOContext& context, ig::CommandList& cmd, const BenchmarkParams& params)
+	: Benchmark(context, cmd, params)
 {
-	vertices = std::vector<Vertex>(numQuads * 6);
-	vertexBuffer.LoadAsVertexBuffer(context, sizeof(Vertex), numQuads * 6, ig::BufferUsage::Dynamic);
+	vertices = std::vector<Vertex>(params.numQuads * 6);
+	vertexBuffer.LoadAsVertexBuffer(context, sizeof(Vertex), params.numQuads * 6, ig::BufferUsage::Dynamic);
 
 	const std::vector<ig::VertexElement> vertexLayout =
 	{
@@ -84,43 +102,44 @@ void Benchmark_BatchedTriangleList::Init(const ig::IGLOContext& context, ig::Com
 	desc.renderTargetDesc = context.GetBackBufferRenderTargetDesc();
 	desc.PS = SHADER_PS(g_PS_Color);
 	desc.VS = SHADER_VS(g_VS_Triangles);
-	desc.primitiveTopology = ig::Primitive::TriangleList;
+	desc.primitiveTopology = ig::PrimitiveTopology::TriangleList;
 	desc.vertexLayout = vertexLayout;
 	pipeline.Load(context, desc);
 }
 
-void Benchmark_BatchedTriangleList::OnRender(const ig::IGLOContext& context, ig::CommandList& cmd, const Quad* quad, uint32_t numQuads)
+void Benchmark_BatchedTriangleList::OnRender(ig::CommandList& cmd)
 {
 	uint32_t currentVertex = 0;
-	for (uint32_t i = 0; i < numQuads; i++)
+	for (uint32_t i = 0; i < params.numQuads; i++)
 	{
-		vertices[currentVertex] = { quad[i].x, quad[i].y, quad[i].color };
-		vertices[currentVertex + 1] = { quad[i].x + quad[i].width, quad[i].y, quad[i].color };
-		vertices[currentVertex + 2] = { quad[i].x, quad[i].y + quad[i].height, quad[i].color };
-		vertices[currentVertex + 3] = { quad[i].x, quad[i].y + quad[i].height, quad[i].color };
-		vertices[currentVertex + 4] = { quad[i].x + quad[i].width, quad[i].y, quad[i].color };
-		vertices[currentVertex + 5] = { quad[i].x + quad[i].width, quad[i].y + quad[i].height, quad[i].color };
+		const Quad& q = params.quads[i];
+		vertices[currentVertex] = { q.x, q.y, q.color };
+		vertices[currentVertex + 1] = { q.x + q.width, q.y, q.color };
+		vertices[currentVertex + 2] = { q.x, q.y + q.height, q.color };
+		vertices[currentVertex + 3] = { q.x, q.y + q.height, q.color };
+		vertices[currentVertex + 4] = { q.x + q.width, q.y, q.color };
+		vertices[currentVertex + 5] = { q.x + q.width, q.y + q.height, q.color };
 		currentVertex += 6;
 	}
 	vertexBuffer.SetDynamicData(vertices.data());
 
 	PushConstants pushConstants;
-	pushConstants.screenSize = ig::Vector2((float)context.GetWidth(), (float)context.GetHeight());
+	pushConstants.screenSize = ig::Vector2((float)params.viewExtent.width, (float)params.viewExtent.height);
 
 	cmd.SetPipeline(pipeline);
 	cmd.SetPushConstants(&pushConstants, sizeof(pushConstants));
 	cmd.SetVertexBuffer(vertexBuffer);
-	cmd.SetPrimitiveTopology(ig::Primitive::TriangleList);
 	cmd.Draw(vertexBuffer.GetNumElements());
 }
 
-void Benchmark_DynamicIndexBuffer::Init(const ig::IGLOContext& context, ig::CommandList& cmd, const Quad* quad, uint32_t numQuads)
+Benchmark_DynamicIndexBuffer::Benchmark_DynamicIndexBuffer(const ig::IGLOContext& context, ig::CommandList& cmd, const BenchmarkParams& params)
+	: Benchmark(context, cmd, params)
 {
-	vertices = std::vector<Vertex>(numQuads * 4);
-	indices = std::vector<uint32_t>(numQuads * 6);
+	vertices = std::vector<Vertex>(params.numQuads * 4);
+	indices = std::vector<uint32_t>(params.numQuads * 6);
 
-	vertexBuffer.LoadAsVertexBuffer(context, sizeof(Vertex), numQuads * 4, ig::BufferUsage::Dynamic);
-	indexBuffer.LoadAsIndexBuffer(context, ig::IndexFormat::UINT32, numQuads * 6, ig::BufferUsage::Dynamic);
+	vertexBuffer.LoadAsVertexBuffer(context, sizeof(Vertex), params.numQuads * 4, ig::BufferUsage::Dynamic);
+	indexBuffer.LoadAsIndexBuffer(context, ig::IndexFormat::UINT32, params.numQuads * 6, ig::BufferUsage::Dynamic);
 
 	const std::vector<ig::VertexElement> vertexLayout =
 	{
@@ -135,21 +154,22 @@ void Benchmark_DynamicIndexBuffer::Init(const ig::IGLOContext& context, ig::Comm
 	desc.renderTargetDesc = context.GetBackBufferRenderTargetDesc();
 	desc.PS = SHADER_PS(g_PS_Color);
 	desc.VS = SHADER_VS(g_VS_Triangles);
-	desc.primitiveTopology = ig::Primitive::TriangleList;
+	desc.primitiveTopology = ig::PrimitiveTopology::TriangleList;
 	desc.vertexLayout = vertexLayout;
 	pipeline.Load(context, desc);
 }
 
-void Benchmark_DynamicIndexBuffer::OnRender(const ig::IGLOContext& context, ig::CommandList& cmd, const Quad* quad, uint32_t numQuads)
+void Benchmark_DynamicIndexBuffer::OnRender(ig::CommandList& cmd)
 {
 	uint32_t currentVertex = 0;
 	uint32_t currentIndex = 0;
-	for (uint32_t i = 0; i < numQuads; i++)
+	for (uint32_t i = 0; i < params.numQuads; i++)
 	{
-		vertices[currentVertex] = { quad[i].x, quad[i].y, quad[i].color };
-		vertices[currentVertex + 1] = { quad[i].x + quad[i].width, quad[i].y, quad[i].color };
-		vertices[currentVertex + 2] = { quad[i].x, quad[i].y + quad[i].height, quad[i].color };
-		vertices[currentVertex + 3] = { quad[i].x + quad[i].width, quad[i].y + quad[i].height, quad[i].color };
+		const Quad& q = params.quads[i];
+		vertices[currentVertex] = { q.x, q.y, q.color };
+		vertices[currentVertex + 1] = { q.x + q.width, q.y, q.color };
+		vertices[currentVertex + 2] = { q.x, q.y + q.height, q.color };
+		vertices[currentVertex + 3] = { q.x + q.width, q.y + q.height, q.color };
 
 		uint32_t baseVertex = currentVertex;
 		indices[currentIndex] = baseVertex;
@@ -166,26 +186,26 @@ void Benchmark_DynamicIndexBuffer::OnRender(const ig::IGLOContext& context, ig::
 	indexBuffer.SetDynamicData(indices.data());
 
 	PushConstants pushConstants;
-	pushConstants.screenSize = ig::Vector2((float)context.GetWidth(), (float)context.GetHeight());
+	pushConstants.screenSize = ig::Vector2((float)params.viewExtent.width, (float)params.viewExtent.height);
 
 	cmd.SetPipeline(pipeline);
 	cmd.SetPushConstants(&pushConstants, sizeof(pushConstants));
 	cmd.SetVertexBuffer(vertexBuffer);
 	cmd.SetIndexBuffer(indexBuffer);
-	cmd.SetPrimitiveTopology(ig::Primitive::TriangleList);
 	cmd.DrawIndexed(indexBuffer.GetNumElements());
 }
 
-void Benchmark_StaticIndexBuffer::Init(const ig::IGLOContext& context, ig::CommandList& cmd, const Quad* quad, uint32_t numQuads)
+Benchmark_StaticIndexBuffer::Benchmark_StaticIndexBuffer(const ig::IGLOContext& context, ig::CommandList& cmd, const BenchmarkParams& params)
+	: Benchmark(context, cmd, params)
 {
-	vertices = std::vector<Vertex>(numQuads * 4);
+	vertices = std::vector<Vertex>(params.numQuads * 4);
 
-	vertexBuffer.LoadAsVertexBuffer(context, sizeof(Vertex), numQuads * 4, ig::BufferUsage::Dynamic);
-	indexBuffer.LoadAsIndexBuffer(context, ig::IndexFormat::UINT32, numQuads * 6, ig::BufferUsage::Default);
+	vertexBuffer.LoadAsVertexBuffer(context, sizeof(Vertex), params.numQuads * 4, ig::BufferUsage::Dynamic);
+	indexBuffer.LoadAsIndexBuffer(context, ig::IndexFormat::UINT32, params.numQuads * 6, ig::BufferUsage::Default);
 
-	// Populate the index buffer at initialization.
-	std::vector<uint32_t> indices(numQuads * 6);
-	for (uint32_t quadIndex = 0; quadIndex < numQuads; quadIndex++)
+	// Populate the index buffer at initialization
+	std::vector<uint32_t> indices(params.numQuads * 6);
+	for (uint32_t quadIndex = 0; quadIndex < params.numQuads; quadIndex++)
 	{
 		uint32_t baseVertex = quadIndex * 4;  // 4 vertices per quad
 		uint32_t indexOffset = quadIndex * 6;  // 6 indices per quad
@@ -212,38 +232,39 @@ void Benchmark_StaticIndexBuffer::Init(const ig::IGLOContext& context, ig::Comma
 	desc.renderTargetDesc = context.GetBackBufferRenderTargetDesc();
 	desc.PS = SHADER_PS(g_PS_Color);
 	desc.VS = SHADER_VS(g_VS_Triangles);
-	desc.primitiveTopology = ig::Primitive::TriangleList;
+	desc.primitiveTopology = ig::PrimitiveTopology::TriangleList;
 	desc.vertexLayout = vertexLayout;
 	pipeline.Load(context, desc);
 }
 
-void Benchmark_StaticIndexBuffer::OnRender(const ig::IGLOContext& context, ig::CommandList& cmd, const Quad* quad, uint32_t numQuads)
+void Benchmark_StaticIndexBuffer::OnRender(ig::CommandList& cmd)
 {
 	uint32_t currentVertex = 0;
-	for (uint32_t i = 0; i < numQuads; i++)
+	for (uint32_t i = 0; i < params.numQuads; i++)
 	{
-		vertices[currentVertex] = { quad[i].x, quad[i].y, quad[i].color };
-		vertices[currentVertex + 1] = { quad[i].x + quad[i].width, quad[i].y, quad[i].color };
-		vertices[currentVertex + 2] = { quad[i].x, quad[i].y + quad[i].height, quad[i].color };
-		vertices[currentVertex + 3] = { quad[i].x + quad[i].width, quad[i].y + quad[i].height, quad[i].color };
+		const Quad& q = params.quads[i];
+		vertices[currentVertex] = { q.x, q.y, q.color };
+		vertices[currentVertex + 1] = { q.x + q.width, q.y, q.color };
+		vertices[currentVertex + 2] = { q.x, q.y + q.height, q.color };
+		vertices[currentVertex + 3] = { q.x + q.width, q.y + q.height, q.color };
 		currentVertex += 4;
 	}
 	vertexBuffer.SetDynamicData(vertices.data());
 
 	PushConstants pushConstants;
-	pushConstants.screenSize = ig::Vector2((float)context.GetWidth(), (float)context.GetHeight());
+	pushConstants.screenSize = ig::Vector2((float)params.viewExtent.width, (float)params.viewExtent.height);
 
 	cmd.SetPipeline(pipeline);
 	cmd.SetPushConstants(&pushConstants, sizeof(pushConstants));
 	cmd.SetVertexBuffer(vertexBuffer);
 	cmd.SetIndexBuffer(indexBuffer);
-	cmd.SetPrimitiveTopology(ig::Primitive::TriangleList);
 	cmd.DrawIndexed(indexBuffer.GetNumElements());
 }
 
-void Benchmark_RawVertexPulling::Init(const ig::IGLOContext& context, ig::CommandList& cmd, const Quad* quad, uint32_t numQuads)
+Benchmark_RawVertexPulling::Benchmark_RawVertexPulling(const ig::IGLOContext& context, ig::CommandList& cmd, const BenchmarkParams& params)
+	: Benchmark(context, cmd, params)
 {
-	rawBuffer.LoadAsRawBuffer(context, sizeof(Quad) * numQuads, ig::BufferUsage::Dynamic);
+	rawBuffer.LoadAsRawBuffer(context, sizeof(Quad) * params.numQuads, ig::BufferUsage::Dynamic);
 
 	ig::PipelineDesc desc;
 	desc.blendStates = { ig::BlendDesc::BlendDisabled };
@@ -252,28 +273,28 @@ void Benchmark_RawVertexPulling::Init(const ig::IGLOContext& context, ig::Comman
 	desc.renderTargetDesc = context.GetBackBufferRenderTargetDesc();
 	desc.PS = SHADER_PS(g_PS_Color);
 	desc.VS = SHADER_VS(g_VS_RawRect); // Use a Raw Vertex Pulling shader
-	desc.primitiveTopology = ig::Primitive::TriangleList;
+	desc.primitiveTopology = ig::PrimitiveTopology::TriangleList;
 	desc.vertexLayout = {}; // No vertex layout
 	pipeline.Load(context, desc);
 }
 
-void Benchmark_RawVertexPulling::OnRender(const ig::IGLOContext& context, ig::CommandList& cmd, const Quad* quad, uint32_t numQuads)
+void Benchmark_RawVertexPulling::OnRender(ig::CommandList& cmd)
 {
-	rawBuffer.SetDynamicData((void*)quad);
+	rawBuffer.SetDynamicData((void*)params.quads);
 
 	PushConstants pushConstants;
-	pushConstants.screenSize = ig::Vector2((float)context.GetWidth(), (float)context.GetHeight());
+	pushConstants.screenSize = ig::Vector2((float)params.viewExtent.width, (float)params.viewExtent.height);
 	pushConstants.rawOrStructuredBufferIndex = rawBuffer.GetDescriptor()->heapIndex;
 
 	cmd.SetPipeline(pipeline);
 	cmd.SetPushConstants(&pushConstants, sizeof(pushConstants));
-	cmd.SetPrimitiveTopology(ig::Primitive::TriangleList);
-	cmd.Draw(numQuads * 6);
+	cmd.Draw(params.numQuads * 6);
 }
 
-void Benchmark_StructuredVertexPulling::Init(const ig::IGLOContext& context, ig::CommandList& cmd, const Quad* quad, uint32_t numQuads)
+Benchmark_StructuredVertexPulling::Benchmark_StructuredVertexPulling(const ig::IGLOContext& context, ig::CommandList& cmd, const BenchmarkParams& params)
+	: Benchmark(context, cmd, params)
 {
-	structuredBuffer.LoadAsStructuredBuffer(context, sizeof(Quad), numQuads, ig::BufferUsage::Dynamic);
+	structuredBuffer.LoadAsStructuredBuffer(context, sizeof(StructuredQuad), params.numQuads, ig::BufferUsage::Dynamic);
 
 	ig::PipelineDesc desc;
 	desc.blendStates = { ig::BlendDesc::BlendDisabled };
@@ -282,28 +303,28 @@ void Benchmark_StructuredVertexPulling::Init(const ig::IGLOContext& context, ig:
 	desc.renderTargetDesc = context.GetBackBufferRenderTargetDesc();
 	desc.PS = SHADER_PS(g_PS_Color);
 	desc.VS = SHADER_VS(g_VS_StructuredRect); // Use a Structured Vertex Pulling shader
-	desc.primitiveTopology = ig::Primitive::TriangleList;
+	desc.primitiveTopology = ig::PrimitiveTopology::TriangleList;
 	desc.vertexLayout = {}; // No vertex layout
 	pipeline.Load(context, desc);
 }
 
-void Benchmark_StructuredVertexPulling::OnRender(const ig::IGLOContext& context, ig::CommandList& cmd, const Quad* quad, uint32_t numQuads)
+void Benchmark_StructuredVertexPulling::OnRender(ig::CommandList& cmd)
 {
-	structuredBuffer.SetDynamicData((void*)quad);
+	structuredBuffer.SetDynamicData((void*)params.structuredQuads);
 
 	PushConstants pushConstants;
-	pushConstants.screenSize = ig::Vector2((float)context.GetWidth(), (float)context.GetHeight());
+	pushConstants.screenSize = ig::Vector2((float)params.viewExtent.width, (float)params.viewExtent.height);
 	pushConstants.rawOrStructuredBufferIndex = structuredBuffer.GetDescriptor()->heapIndex;
 
 	cmd.SetPipeline(pipeline);
 	cmd.SetPushConstants(&pushConstants, sizeof(pushConstants));
-	cmd.SetPrimitiveTopology(ig::Primitive::TriangleList);
-	cmd.Draw(numQuads * 6);
+	cmd.Draw(params.numQuads * 6);
 }
 
-void Benchmark_Instancing::Init(const ig::IGLOContext& context, ig::CommandList& cmd, const Quad* quad, uint32_t numQuads)
+Benchmark_Instancing::Benchmark_Instancing(const ig::IGLOContext& context, ig::CommandList& cmd, const BenchmarkParams& params)
+	: Benchmark(context, cmd, params)
 {
-	vertexBuffer.LoadAsVertexBuffer(context, sizeof(Quad), numQuads, ig::BufferUsage::Dynamic);
+	vertexBuffer.LoadAsVertexBuffer(context, sizeof(Quad), params.numQuads, ig::BufferUsage::Dynamic);
 
 	// Use a per-instance vertex layout
 	const std::vector<ig::VertexElement> vertexLayout =
@@ -321,39 +342,40 @@ void Benchmark_Instancing::Init(const ig::IGLOContext& context, ig::CommandList&
 	desc.renderTargetDesc = context.GetBackBufferRenderTargetDesc();
 	desc.PS = SHADER_PS(g_PS_Color);
 	desc.VS = SHADER_VS(g_VS_InstancedRect); // Use an Instancing shader
-	desc.primitiveTopology = ig::Primitive::TriangleStrip; // Use triangle strips
+	desc.primitiveTopology = ig::PrimitiveTopology::TriangleStrip; // Use triangle strips
 	desc.vertexLayout = vertexLayout;
 	pipeline.Load(context, desc);
 }
 
-void Benchmark_Instancing::OnRender(const ig::IGLOContext& context, ig::CommandList& cmd, const Quad* quad, uint32_t numQuads)
+void Benchmark_Instancing::OnRender(ig::CommandList& cmd)
 {
-	vertexBuffer.SetDynamicData((void*)quad);
+	vertexBuffer.SetDynamicData((void*)params.quads);
 
 	PushConstants pushConstants;
-	pushConstants.screenSize = ig::Vector2((float)context.GetWidth(), (float)context.GetHeight());
+	pushConstants.screenSize = ig::Vector2((float)params.viewExtent.width, (float)params.viewExtent.height);
 
 	cmd.SetPipeline(pipeline);
 	cmd.SetPushConstants(&pushConstants, sizeof(pushConstants));
 	cmd.SetVertexBuffer(vertexBuffer);
-	cmd.SetPrimitiveTopology(ig::Primitive::TriangleStrip);
-	cmd.DrawInstanced(4, numQuads);
+	cmd.DrawInstanced(4, params.numQuads);
 }
 
-void Benchmark_GPUTriangles::Init(const ig::IGLOContext& context, ig::CommandList& cmd, const Quad* quad, uint32_t numQuads)
+Benchmark_GPUTriangles::Benchmark_GPUTriangles(const ig::IGLOContext& context, ig::CommandList& cmd, const BenchmarkParams& params)
+	: Benchmark(context, cmd, params)
 {
-	vertexBuffer.LoadAsVertexBuffer(context, sizeof(Vertex), numQuads * 6, ig::BufferUsage::Default);
+	vertexBuffer.LoadAsVertexBuffer(context, sizeof(Vertex), params.numQuads * 6, ig::BufferUsage::Default);
 
-	std::vector<Vertex> vertexData(numQuads * 6);
+	std::vector<Vertex> vertexData(params.numQuads * 6);
 	uint32_t currentVertex = 0;
-	for (uint32_t i = 0; i < numQuads; i++)
+	for (uint32_t i = 0; i < params.numQuads; i++)
 	{
-		vertexData[currentVertex] = { quad[i].x, quad[i].y, quad[i].color };
-		vertexData[currentVertex + 1] = { quad[i].x + quad[i].width, quad[i].y, quad[i].color };
-		vertexData[currentVertex + 2] = { quad[i].x, quad[i].y + quad[i].height, quad[i].color };
-		vertexData[currentVertex + 3] = { quad[i].x, quad[i].y + quad[i].height, quad[i].color };
-		vertexData[currentVertex + 4] = { quad[i].x + quad[i].width, quad[i].y, quad[i].color };
-		vertexData[currentVertex + 5] = { quad[i].x + quad[i].width, quad[i].y + quad[i].height, quad[i].color };
+		const Quad& q = params.quads[i];
+		vertexData[currentVertex] = { q.x, q.y, q.color };
+		vertexData[currentVertex + 1] = { q.x + q.width, q.y, q.color };
+		vertexData[currentVertex + 2] = { q.x, q.y + q.height, q.color };
+		vertexData[currentVertex + 3] = { q.x, q.y + q.height, q.color };
+		vertexData[currentVertex + 4] = { q.x + q.width, q.y, q.color };
+		vertexData[currentVertex + 5] = { q.x + q.width, q.y + q.height, q.color };
 		currentVertex += 6;
 	}
 	vertexBuffer.SetData(cmd, vertexData.data());
@@ -371,44 +393,45 @@ void Benchmark_GPUTriangles::Init(const ig::IGLOContext& context, ig::CommandLis
 	desc.renderTargetDesc = context.GetBackBufferRenderTargetDesc();
 	desc.PS = SHADER_PS(g_PS_Color);
 	desc.VS = SHADER_VS(g_VS_Triangles);
-	desc.primitiveTopology = ig::Primitive::TriangleList;
+	desc.primitiveTopology = ig::PrimitiveTopology::TriangleList;
 	desc.vertexLayout = vertexLayout;
 	pipeline.Load(context, desc);
 }
 
-void Benchmark_GPUTriangles::OnRender(const ig::IGLOContext& context, ig::CommandList& cmd, const Quad* quad, uint32_t numQuads)
+void Benchmark_GPUTriangles::OnRender(ig::CommandList& cmd)
 {
 	PushConstants pushConstants;
-	pushConstants.screenSize = ig::Vector2((float)context.GetWidth(), (float)context.GetHeight());
+	pushConstants.screenSize = ig::Vector2((float)params.viewExtent.width, (float)params.viewExtent.height);
 
 	cmd.SetPipeline(pipeline);
 	cmd.SetPushConstants(&pushConstants, sizeof(pushConstants));
 	cmd.SetVertexBuffer(vertexBuffer);
-	cmd.SetPrimitiveTopology(ig::Primitive::TriangleList);
 	cmd.Draw(vertexBuffer.GetNumElements());
 }
 
-void Benchmark_GPUIndexBuffer::Init(const ig::IGLOContext& context, ig::CommandList& cmd, const Quad* quad, uint32_t numQuads)
+Benchmark_GPUIndexBuffer::Benchmark_GPUIndexBuffer(const ig::IGLOContext& context, ig::CommandList& cmd, const BenchmarkParams& params)
+	: Benchmark(context, cmd, params)
 {
-	vertexBuffer.LoadAsVertexBuffer(context, sizeof(Vertex), numQuads * 6, ig::BufferUsage::Default);
-	indexBuffer.LoadAsIndexBuffer(context, ig::IndexFormat::UINT32, numQuads * 6, ig::BufferUsage::Default);
+	vertexBuffer.LoadAsVertexBuffer(context, sizeof(Vertex), params.numQuads * 6, ig::BufferUsage::Default);
+	indexBuffer.LoadAsIndexBuffer(context, ig::IndexFormat::UINT32, params.numQuads * 6, ig::BufferUsage::Default);
 
-	std::vector<Vertex> vertexData(numQuads * 6);
+	std::vector<Vertex> vertexData(params.numQuads * 6);
 	uint32_t currentVertex = 0;
-	for (uint32_t i = 0; i < numQuads; i++)
+	for (uint32_t i = 0; i < params.numQuads; i++)
 	{
-		vertexData[currentVertex] = { quad[i].x, quad[i].y, quad[i].color };
-		vertexData[currentVertex + 1] = { quad[i].x + quad[i].width, quad[i].y, quad[i].color };
-		vertexData[currentVertex + 2] = { quad[i].x, quad[i].y + quad[i].height, quad[i].color };
-		vertexData[currentVertex + 3] = { quad[i].x, quad[i].y + quad[i].height, quad[i].color };
-		vertexData[currentVertex + 4] = { quad[i].x + quad[i].width, quad[i].y, quad[i].color };
-		vertexData[currentVertex + 5] = { quad[i].x + quad[i].width, quad[i].y + quad[i].height, quad[i].color };
+		const Quad& q = params.quads[i];
+		vertexData[currentVertex] = { q.x, q.y, q.color };
+		vertexData[currentVertex + 1] = { q.x + q.width, q.y, q.color };
+		vertexData[currentVertex + 2] = { q.x, q.y + q.height, q.color };
+		vertexData[currentVertex + 3] = { q.x, q.y + q.height, q.color };
+		vertexData[currentVertex + 4] = { q.x + q.width, q.y, q.color };
+		vertexData[currentVertex + 5] = { q.x + q.width, q.y + q.height, q.color };
 		currentVertex += 6;
 	}
 	vertexBuffer.SetData(cmd, vertexData.data());
 
-	std::vector<uint32_t> indices(numQuads * 6);
-	for (uint32_t quadIndex = 0; quadIndex < numQuads; quadIndex++)
+	std::vector<uint32_t> indices(params.numQuads * 6);
+	for (uint32_t quadIndex = 0; quadIndex < params.numQuads; quadIndex++)
 	{
 		uint32_t baseVertex = quadIndex * 4;  // 4 vertices per quad
 		uint32_t indexOffset = quadIndex * 6;  // 6 indices per quad
@@ -435,28 +458,28 @@ void Benchmark_GPUIndexBuffer::Init(const ig::IGLOContext& context, ig::CommandL
 	desc.renderTargetDesc = context.GetBackBufferRenderTargetDesc();
 	desc.PS = SHADER_PS(g_PS_Color);
 	desc.VS = SHADER_VS(g_VS_Triangles);
-	desc.primitiveTopology = ig::Primitive::TriangleList;
+	desc.primitiveTopology = ig::PrimitiveTopology::TriangleList;
 	desc.vertexLayout = vertexLayout;
 	pipeline.Load(context, desc);
 }
 
-void Benchmark_GPUIndexBuffer::OnRender(const ig::IGLOContext& context, ig::CommandList& cmd, const Quad* quad, uint32_t numQuads)
+void Benchmark_GPUIndexBuffer::OnRender(ig::CommandList& cmd)
 {
 	PushConstants pushConstants;
-	pushConstants.screenSize = ig::Vector2((float)context.GetWidth(), (float)context.GetHeight());
+	pushConstants.screenSize = ig::Vector2((float)params.viewExtent.width, (float)params.viewExtent.height);
 
 	cmd.SetPipeline(pipeline);
 	cmd.SetPushConstants(&pushConstants, sizeof(pushConstants));
 	cmd.SetVertexBuffer(vertexBuffer);
 	cmd.SetIndexBuffer(indexBuffer);
-	cmd.SetPrimitiveTopology(ig::Primitive::TriangleList);
 	cmd.Draw(vertexBuffer.GetNumElements());
 }
 
-void Benchmark_GPURaw::Init(const ig::IGLOContext& context, ig::CommandList& cmd, const Quad* quad, uint32_t numQuads)
+Benchmark_GPURaw::Benchmark_GPURaw(const ig::IGLOContext& context, ig::CommandList& cmd, const BenchmarkParams& params)
+	: Benchmark(context, cmd, params)
 {
-	rawBuffer.LoadAsRawBuffer(context, sizeof(Quad) * numQuads, ig::BufferUsage::Default);
-	rawBuffer.SetData(cmd, (void*)quad);
+	rawBuffer.LoadAsRawBuffer(context, sizeof(Quad) * params.numQuads, ig::BufferUsage::Default);
+	rawBuffer.SetData(cmd, (void*)params.quads);
 
 	ig::PipelineDesc desc;
 	desc.blendStates = { ig::BlendDesc::BlendDisabled };
@@ -465,27 +488,27 @@ void Benchmark_GPURaw::Init(const ig::IGLOContext& context, ig::CommandList& cmd
 	desc.renderTargetDesc = context.GetBackBufferRenderTargetDesc();
 	desc.PS = SHADER_PS(g_PS_Color);
 	desc.VS = SHADER_VS(g_VS_RawRect); // Use a Raw Vertex Pulling shader
-	desc.primitiveTopology = ig::Primitive::TriangleList;
+	desc.primitiveTopology = ig::PrimitiveTopology::TriangleList;
 	desc.vertexLayout = {}; // No vertex layout
 	pipeline.Load(context, desc);
 }
 
-void Benchmark_GPURaw::OnRender(const ig::IGLOContext& context, ig::CommandList& cmd, const Quad* quad, uint32_t numQuads)
+void Benchmark_GPURaw::OnRender(ig::CommandList& cmd)
 {
 	PushConstants pushConstants;
-	pushConstants.screenSize = ig::Vector2((float)context.GetWidth(), (float)context.GetHeight());
+	pushConstants.screenSize = ig::Vector2((float)params.viewExtent.width, (float)params.viewExtent.height);
 	pushConstants.rawOrStructuredBufferIndex = rawBuffer.GetDescriptor()->heapIndex;
 
 	cmd.SetPipeline(pipeline);
 	cmd.SetPushConstants(&pushConstants, sizeof(pushConstants));
-	cmd.SetPrimitiveTopology(ig::Primitive::TriangleList);
-	cmd.Draw(numQuads * 6);
+	cmd.Draw(params.numQuads * 6);
 }
 
-void Benchmark_GPUStructured::Init(const ig::IGLOContext& context, ig::CommandList& cmd, const Quad* quad, uint32_t numQuads)
+Benchmark_GPUStructured::Benchmark_GPUStructured(const ig::IGLOContext& context, ig::CommandList& cmd, const BenchmarkParams& params)
+	: Benchmark(context, cmd, params)
 {
-	structuredBuffer.LoadAsRawBuffer(context, sizeof(Quad) * numQuads, ig::BufferUsage::Default);
-	structuredBuffer.SetData(cmd, (void*)quad);
+	structuredBuffer.LoadAsRawBuffer(context, sizeof(StructuredQuad) * params.numQuads, ig::BufferUsage::Default);
+	structuredBuffer.SetData(cmd, (void*)params.structuredQuads);
 
 	ig::PipelineDesc desc;
 	desc.blendStates = { ig::BlendDesc::BlendDisabled };
@@ -494,27 +517,27 @@ void Benchmark_GPUStructured::Init(const ig::IGLOContext& context, ig::CommandLi
 	desc.renderTargetDesc = context.GetBackBufferRenderTargetDesc();
 	desc.PS = SHADER_PS(g_PS_Color);
 	desc.VS = SHADER_VS(g_VS_StructuredRect); // Use a Structured Vertex Pulling shader
-	desc.primitiveTopology = ig::Primitive::TriangleList;
+	desc.primitiveTopology = ig::PrimitiveTopology::TriangleList;
 	desc.vertexLayout = {}; // No vertex layout
 	pipeline.Load(context, desc);
 }
 
-void Benchmark_GPUStructured::OnRender(const ig::IGLOContext& context, ig::CommandList& cmd, const Quad* quad, uint32_t numQuads)
+void Benchmark_GPUStructured::OnRender(ig::CommandList& cmd)
 {
 	PushConstants pushConstants;
-	pushConstants.screenSize = ig::Vector2((float)context.GetWidth(), (float)context.GetHeight());
+	pushConstants.screenSize = ig::Vector2((float)params.viewExtent.width, (float)params.viewExtent.height);
 	pushConstants.rawOrStructuredBufferIndex = structuredBuffer.GetDescriptor()->heapIndex;
 
 	cmd.SetPipeline(pipeline);
 	cmd.SetPushConstants(&pushConstants, sizeof(pushConstants));
-	cmd.SetPrimitiveTopology(ig::Primitive::TriangleList);
-	cmd.Draw(numQuads * 6);
+	cmd.Draw(params.numQuads * 6);
 }
 
-void Benchmark_GPUInstancing::Init(const ig::IGLOContext& context, ig::CommandList& cmd, const Quad* quad, uint32_t numQuads)
+Benchmark_GPUInstancing::Benchmark_GPUInstancing(const ig::IGLOContext& context, ig::CommandList& cmd, const BenchmarkParams& params)
+	: Benchmark(context, cmd, params)
 {
-	vertexBuffer.LoadAsVertexBuffer(context, sizeof(Quad), numQuads, ig::BufferUsage::Default);
-	vertexBuffer.SetData(cmd, (void*)quad);
+	vertexBuffer.LoadAsVertexBuffer(context, sizeof(Quad), params.numQuads, ig::BufferUsage::Default);
+	vertexBuffer.SetData(cmd, (void*)params.quads);
 
 	// Use a per-instance vertex layout
 	const std::vector<ig::VertexElement> vertexLayout =
@@ -532,19 +555,18 @@ void Benchmark_GPUInstancing::Init(const ig::IGLOContext& context, ig::CommandLi
 	desc.renderTargetDesc = context.GetBackBufferRenderTargetDesc();
 	desc.PS = SHADER_PS(g_PS_Color);
 	desc.VS = SHADER_VS(g_VS_InstancedRect); // Use an Instancing shader
-	desc.primitiveTopology = ig::Primitive::TriangleStrip; // Use triangle strips
+	desc.primitiveTopology = ig::PrimitiveTopology::TriangleStrip; // Use triangle strips
 	desc.vertexLayout = vertexLayout;
 	pipeline.Load(context, desc);
 }
 
-void Benchmark_GPUInstancing::OnRender(const ig::IGLOContext& context, ig::CommandList& cmd, const Quad* quad, uint32_t numQuads)
+void Benchmark_GPUInstancing::OnRender(ig::CommandList& cmd)
 {
 	PushConstants pushConstants;
-	pushConstants.screenSize = ig::Vector2((float)context.GetWidth(), (float)context.GetHeight());
+	pushConstants.screenSize = ig::Vector2((float)params.viewExtent.width, (float)params.viewExtent.height);
 
 	cmd.SetPipeline(pipeline);
 	cmd.SetPushConstants(&pushConstants, sizeof(pushConstants));
 	cmd.SetVertexBuffer(vertexBuffer);
-	cmd.SetPrimitiveTopology(ig::Primitive::TriangleStrip);
-	cmd.DrawInstanced(4, numQuads);
+	cmd.DrawInstanced(4, params.numQuads);
 }

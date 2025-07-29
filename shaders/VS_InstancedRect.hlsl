@@ -1,7 +1,7 @@
 
 #include "Common.hlsl"
 
-ConstantBuffer<PushConstants> pushConstants : register(b0);
+[[vk::push_constant]] ConstantBuffer<PushConstants> pushConstants : register(b0);
 
 struct VertexInput
 {

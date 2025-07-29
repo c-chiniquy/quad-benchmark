@@ -1,7 +1,7 @@
 
 #include "Common.hlsl"
 
-ConstantBuffer<PushConstants> pushConstants : register(b0);
+[[vk::push_constant]] ConstantBuffer<PushConstants> pushConstants : register(b0);
 
 struct VertexInput
 {
@@ -9,6 +9,11 @@ struct VertexInput
 	float width;
 	float height;
 	uint color;
+#ifdef STRUCTURED_BUFFER
+#ifdef VULKAN
+	uint padding; // Vulkan requires an alignment of 8 for structured buffers.
+#endif
+#endif
 };
 
 struct PixelInput
@@ -20,11 +25,11 @@ struct PixelInput
 PixelInput VSMain(uint vertexID : SV_VertexID)
 {
 #ifdef STRUCTURED_BUFFER
-	StructuredBuffer<VertexInput> buffer = ResourceDescriptorHeap[pushConstants.rawOrStructuredBufferIndex]; // Structured buffer
+	StructuredBuffer<VertexInput> buffer = ResourceDescriptorHeap[pushConstants.rawOrStructuredBufferIndex];
 #endif
 
 #ifdef RAW_BUFFER
-	ByteAddressBuffer buffer = ResourceDescriptorHeap[pushConstants.rawOrStructuredBufferIndex]; // Raw buffer
+	ByteAddressBuffer buffer = ResourceDescriptorHeap[pushConstants.rawOrStructuredBufferIndex];
 #endif
 
 	uint elementSize = 5 * 4;
