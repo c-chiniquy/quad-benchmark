@@ -1,0 +1,3758 @@
+﻿
+#include "iglo.h"
+#include "shaders/CS_GenerateMipmaps.h"
+
+#define STBI_WINDOWS_UTF8
+#define STB_IMAGE_IMPLEMENTATION
+#include "stb/stb_image.h"
+
+#ifdef _WIN32
+// Quick workaround to stop stb_image_write.h from causing visual studio compile error: "'sprintf': This function or variable may be unsafe."
+#define __STDC_LIB_EXT1__
+#endif
+#define STB_IMAGE_WRITE_IMPLEMENTATION
+#define STBIW_WINDOWS_UTF8
+#include "stb/stb_image_write.h"
+
+namespace ig
+{
+	const BlendDesc BlendDesc::BlendDisabled =
+	{
+		false, // enabled
+		BlendData::SourceAlpha, BlendData::InverseSourceAlpha, BlendOperation::Add,
+		BlendData::One, BlendData::InverseSourceAlpha, BlendOperation::Add,
+		(byte)ColorWriteMask::All
+	};
+	const BlendDesc BlendDesc::StraightAlpha =
+	{
+		true, // enabled
+		BlendData::SourceAlpha, BlendData::InverseSourceAlpha, BlendOperation::Add,
+		// Dest alpha is affected by src alpha, which is useful for when drawing to transparent rendertargets.
+		BlendData::One, BlendData::InverseSourceAlpha, BlendOperation::Add,
+		(byte)ColorWriteMask::All
+	};
+	const BlendDesc BlendDesc::PremultipliedAlpha =
+	{
+		true, // enabled
+		BlendData::One, BlendData::InverseSourceAlpha, BlendOperation::Add,
+		BlendData::One, BlendData::InverseSourceAlpha, BlendOperation::Add,
+		(byte)ColorWriteMask::All
+	};
+
+	const DepthDesc DepthDesc::DepthDisabled =
+	{
+		false, // enableDepth
+		DepthWriteMask::All, // depthWriteMask
+		ComparisonFunc::Less, // depthFunc
+		false, // enableStencil
+		0xff, // stencilReadMask
+		0xff, // stencilWriteMask
+		StencilOp::Keep,
+		StencilOp::Increase,
+		StencilOp::Keep,
+		ComparisonFunc::Always,
+		StencilOp::Keep,
+		StencilOp::Decrease,
+		StencilOp::Keep,
+		ComparisonFunc::Always
+	};
+	const DepthDesc DepthDesc::DepthEnabled =
+	{
+		true, // enableDepth
+		DepthWriteMask::All, // depthWriteMask
+		ComparisonFunc::Less, // depthFunc
+		false, // enableStencil
+		0xff, // stencilReadMask
+		0xff, // stencilWriteMask
+		StencilOp::Keep,
+		StencilOp::Increase,
+		StencilOp::Keep,
+		ComparisonFunc::Always,
+		StencilOp::Keep,
+		StencilOp::Decrease,
+		StencilOp::Keep,
+		ComparisonFunc::Always
+	};
+	const DepthDesc DepthDesc::DepthAndStencilEnabled =
+	{
+		true, // enableDepth
+		DepthWriteMask::All, // depthWriteMask
+		ComparisonFunc::Less, // depthFunc
+		true, // enableStencil
+		0xff, // stencilReadMask
+		0xff, // stencilWriteMask
+		StencilOp::Keep,
+		StencilOp::Increase,
+		StencilOp::Keep,
+		ComparisonFunc::Always,
+		StencilOp::Keep,
+		StencilOp::Decrease,
+		StencilOp::Keep,
+		ComparisonFunc::Always
+	};
+
+	const RasterizerDesc RasterizerDesc::NoCull =
+	{
+		false, Cull::Disabled, FrontFace::CW, 0, 0.0f, 0.0f, true, LineRasterizationMode::Smooth, 0, false
+	};
+	const RasterizerDesc RasterizerDesc::BackCull =
+	{
+		false, Cull::Back, FrontFace::CW, 0, 0.0f, 0.0f, true, LineRasterizationMode::Smooth, 0, false
+	};
+	const RasterizerDesc RasterizerDesc::FrontCull =
+	{
+		false, Cull::Front, FrontFace::CW, 0, 0.0f, 0.0f, true, LineRasterizationMode::Smooth, 0, false
+	};
+
+	const SamplerDesc SamplerDesc::PixelatedRepeatSampler =
+	{
+		TextureFilter::Point, TextureWrapMode::Repeat, TextureWrapMode::Repeat, TextureWrapMode::Repeat,
+		0, // minLOD
+		IGLO_FLOAT32_MAX, // maxLOD
+		0, // mipMapLODBias
+		ComparisonFunc::None,
+		Colors::Black // borderColor
+	};
+	const SamplerDesc SamplerDesc::SmoothRepeatSampler =
+	{
+		TextureFilter::AnisotropicX16, TextureWrapMode::Repeat, TextureWrapMode::Repeat, TextureWrapMode::Repeat,
+		0, // minLOD
+		IGLO_FLOAT32_MAX, // maxLOD
+		0, // mipMapLODBias
+		ComparisonFunc::None,
+		Colors::Black // borderColor
+	};
+	const SamplerDesc SamplerDesc::SmoothClampSampler =
+	{
+		TextureFilter::AnisotropicX16, TextureWrapMode::Clamp, TextureWrapMode::Clamp, TextureWrapMode::Clamp,
+		0, // minLOD
+		IGLO_FLOAT32_MAX, // maxLOD
+		0, // mipMapLODBias
+		ComparisonFunc::None,
+		Colors::Black // borderColor
+	};
+
+	static CallbackLog logCallback = nullptr;
+	static CallbackFatal fatalCallback = nullptr;
+
+	void Log(LogType type, const std::string& message)
+	{
+		if (logCallback)
+		{
+			logCallback(type, message);
+		}
+		else
+		{
+			std::string typeStr = "IGLO ";
+
+			if (type == LogType::Info) typeStr += "Info: ";
+			else if (type == LogType::Warning) typeStr += "Warning: ";
+			else if (type == LogType::Error) typeStr += "Error: ";
+			else if (type == LogType::FatalError) typeStr += "Fatal error: ";
+			else typeStr += ": ";
+
+			Print(typeStr + message + "\n");
+		}
+	}
+
+	void SetLogCallback(CallbackLog logFunc)
+	{
+		logCallback = logFunc;
+	}
+
+	[[noreturn]] void Fatal(const std::string& message)
+	{
+		Log(LogType::FatalError, message);
+		if (fatalCallback) fatalCallback(message);
+		std::abort();
+	}
+
+	void SetFatalCallback(CallbackFatal fatalFunc)
+	{
+		fatalCallback = fatalFunc;
+	}
+
+	std::string GetGpuVendorNameFromID(uint32_t vendorID)
+	{
+		switch (vendorID)
+		{
+		case 0x10DE: return "NVIDIA";
+		case 0x1002: return "AMD";
+		case 0x8086: return "Intel";
+		case 0x5143: return "Qualcomm";
+		case 0x13B5: return "ARM";
+		case 0x106B: return "Apple";
+		default:     return "Unknown Vendor";
+		}
+	}
+
+	FormatInfo GetFormatInfo(Format format)
+	{
+		uint32_t size = 0; // pixel size in bytes.
+		uint32_t block = 0; // For block-compressed formats.
+		uint32_t elem = 0; // Amount of elements. (Color channels).
+		bool isDepth = false;
+		bool hasStencil = false;
+		Format sRGB_anti = Format::None;
+		bool sRGB = false;
+
+		switch (format)
+		{
+		case Format::BYTE:							elem = 1; size = 1;																	 break;
+		case Format::BYTE_BYTE:						elem = 2; size = 2;																	 break;
+		case Format::BYTE_BYTE_BYTE_BYTE:			elem = 4; size = 4;  sRGB_anti = Format::BYTE_BYTE_BYTE_BYTE_sRGB;					 break;
+		case Format::BYTE_BYTE_BYTE_BYTE_sRGB:		elem = 4; size = 4;	 sRGB_anti = Format::BYTE_BYTE_BYTE_BYTE;			sRGB = true; break;
+		case Format::BYTE_BYTE_BYTE_BYTE_BGRA:		elem = 4; size = 4;	 sRGB_anti = Format::BYTE_BYTE_BYTE_BYTE_BGRA_sRGB;				 break;
+		case Format::BYTE_BYTE_BYTE_BYTE_BGRA_sRGB: elem = 4; size = 4;	 sRGB_anti = Format::BYTE_BYTE_BYTE_BYTE_BGRA;		sRGB = true; break;
+
+		case Format::BYTE_NotNormalized:			elem = 1; size = 1; break;
+		case Format::INT8:							elem = 1; size = 1; break;
+		case Format::INT8_NotNormalized:			elem = 1; size = 1; break;
+		case Format::UINT16:						elem = 1; size = 2; break;
+		case Format::UINT16_NotNormalized:			elem = 1; size = 2; break;
+		case Format::INT16:							elem = 1; size = 2; break;
+		case Format::INT16_NotNormalized:			elem = 1; size = 2; break;
+		case Format::FLOAT16:						elem = 1; size = 2; break;
+		case Format::INT32_NotNormalized:			elem = 1; size = 4; break;
+		case Format::UINT32_NotNormalized:			elem = 1; size = 4; break;
+		case Format::FLOAT:							elem = 1; size = 4; break;
+
+		case Format::BYTE_BYTE_NotNormalized:		elem = 2; size = 2;  break;
+		case Format::INT8_INT8:						elem = 2; size = 2;  break;
+		case Format::INT8_INT8_NotNormalized:		elem = 2; size = 2;  break;
+		case Format::UINT16_UINT16:					elem = 2; size = 4;  break;
+		case Format::UINT16_UINT16_NotNormalized:	elem = 2; size = 4;  break;
+		case Format::INT16_INT16:					elem = 2; size = 4;  break;
+		case Format::INT16_INT16_NotNormalized:		elem = 2; size = 4;	 break;
+		case Format::FLOAT16_FLOAT16:				elem = 2; size = 4;  break;
+		case Format::UINT32_UINT32_NotNormalized:	elem = 2; size = 8;  break;
+		case Format::INT32_INT32_NotNormalized:		elem = 2; size = 8;	 break;
+		case Format::FLOAT_FLOAT:					elem = 2; size = 8;  break;
+
+		case Format::UFLOAT11_UFLOAT11_UFLOAT10:			elem = 3; size = 4;  break;
+		case Format::UINT32_UINT32_UINT32_NotNormalized:	elem = 3; size = 12; break;
+		case Format::INT32_INT32_INT32_NotNormalized:		elem = 3; size = 12; break;
+		case Format::FLOAT_FLOAT_FLOAT:						elem = 3; size = 12; break;
+
+		case Format::BYTE_BYTE_BYTE_BYTE_NotNormalized:			elem = 4; size = 4;  break;
+		case Format::INT8_INT8_INT8_INT8:						elem = 4; size = 4;  break;
+		case Format::INT8_INT8_INT8_INT8_NotNormalized:			elem = 4; size = 4;  break;
+		case Format::UINT10_UINT10_UINT10_UINT2:				elem = 4; size = 4;	 break;
+		case Format::UINT10_UINT10_UINT10_UINT2_NotNormalized:	elem = 4; size = 4;	 break;
+		case Format::UFLOAT9_UFLOAT9_UFLOAT9_UFLOAT5:			elem = 4; size = 4;	 break;
+		case Format::UINT16_UINT16_UINT16_UINT16:				elem = 4; size = 8;  break;
+		case Format::UINT16_UINT16_UINT16_UINT16_NotNormalized:	elem = 4; size = 8;  break;
+		case Format::INT16_INT16_INT16_INT16:					elem = 4; size = 8;  break;
+		case Format::INT16_INT16_INT16_INT16_NotNormalized:		elem = 4; size = 8;  break;
+		case Format::FLOAT16_FLOAT16_FLOAT16_FLOAT16:			elem = 4; size = 8;  break;
+		case Format::UINT32_UINT32_UINT32_UINT32_NotNormalized:	elem = 4; size = 16; break;
+		case Format::INT32_INT32_INT32_INT32_NotNormalized:		elem = 4; size = 16; break;
+		case Format::FLOAT_FLOAT_FLOAT_FLOAT:					elem = 4; size = 16; break;
+
+		case Format::BC1:			block = 8;	elem = 4; sRGB_anti = Format::BC1_sRGB;				 break;
+		case Format::BC1_sRGB:		block = 8;	elem = 4; sRGB_anti = Format::BC1;		sRGB = true; break;
+		case Format::BC2:			block = 16;	elem = 4; sRGB_anti = Format::BC2_sRGB;				 break;
+		case Format::BC2_sRGB:		block = 16;	elem = 4; sRGB_anti = Format::BC2;		sRGB = true; break;
+		case Format::BC3:			block = 16;	elem = 4; sRGB_anti = Format::BC3_sRGB;				 break;
+		case Format::BC3_sRGB:		block = 16;	elem = 4; sRGB_anti = Format::BC3;		sRGB = true; break;
+		case Format::BC4_UNSIGNED:	block = 8;	elem = 1; break;
+		case Format::BC4_SIGNED:	block = 8;	elem = 1; break;
+		case Format::BC5_UNSIGNED:	block = 16; elem = 2; break;
+		case Format::BC5_SIGNED:	block = 16; elem = 2; break;
+		case Format::BC6H_UFLOAT16: block = 16; elem = 4; break;
+		case Format::BC6H_SFLOAT16: block = 16; elem = 4; break;
+		case Format::BC7:			block = 16;	elem = 4; sRGB_anti = Format::BC7_sRGB;				 break;
+		case Format::BC7_sRGB:		block = 16;	elem = 4; sRGB_anti = Format::BC7;		sRGB = true; break;
+
+		case Format::DEPTHFORMAT_FLOAT:			elem = 1; size = 4; isDepth = true; break;
+		case Format::DEPTHFORMAT_UINT16:		elem = 1; size = 2; isDepth = true; break;
+		case Format::DEPTHFORMAT_UINT24_BYTE:	elem = 2; size = 4; isDepth = true; hasStencil = true; break;
+
+			// NOTE: D3D12's GetCopyableFootprints() seems to think that this format is 4 bytes per pixel, not 5 or 8.
+			// For code simplicity, size is set to 4 to match the size returned from GetCopyableFootprints().
+		case Format::DEPTHFORMAT_FLOAT_BYTE:	elem = 2; size = 4; isDepth = true; hasStencil = true; break;
+
+		default:
+			break;
+		}
+
+		FormatInfo out = FormatInfo();
+		out.blockSize = block;
+		out.bytesPerPixel = size;
+		out.elementCount = elem;
+		out.isDepthFormat = isDepth;
+		out.hasStencilComponent = hasStencil;
+		out.is_sRGB = sRGB;
+		out.sRGB_opposite = sRGB_anti;
+		return out;
+	}
+
+	const char* GetFormatName(Format format)
+	{
+		switch (format)
+		{
+		case Format::None: return "None";
+		case Format::BYTE: return "BYTE";
+		case Format::BYTE_BYTE: return "BYTE_BYTE";
+		case Format::BYTE_BYTE_BYTE_BYTE: return "BYTE_BYTE_BYTE_BYTE";
+		case Format::INT8: return "INT8";
+		case Format::INT8_INT8: return "INT8_INT8";
+		case Format::INT8_INT8_INT8_INT8: return "INT8_INT8_INT8_INT8";
+		case Format::UINT16: return "UINT16";
+		case Format::UINT16_UINT16: return "UINT16_UINT16";
+		case Format::UINT16_UINT16_UINT16_UINT16: return "UINT16_UINT16_UINT16_UINT16";
+		case Format::INT16: return "INT16";
+		case Format::INT16_INT16: return "INT16_INT16";
+		case Format::INT16_INT16_INT16_INT16: return "INT16_INT16_INT16_INT16";
+		case Format::FLOAT16: return "FLOAT16";
+		case Format::FLOAT16_FLOAT16: return "FLOAT16_FLOAT16";
+		case Format::FLOAT16_FLOAT16_FLOAT16_FLOAT16: return "FLOAT16_FLOAT16_FLOAT16_FLOAT16";
+		case Format::FLOAT: return "FLOAT";
+		case Format::FLOAT_FLOAT: return "FLOAT_FLOAT";
+		case Format::FLOAT_FLOAT_FLOAT: return "FLOAT_FLOAT_FLOAT";
+		case Format::FLOAT_FLOAT_FLOAT_FLOAT: return "FLOAT_FLOAT_FLOAT_FLOAT";
+		case Format::UINT10_UINT10_UINT10_UINT2: return "UINT10_UINT10_UINT10_UINT2";
+		case Format::UINT10_UINT10_UINT10_UINT2_NotNormalized: return "UINT10_UINT10_UINT10_UINT2_NotNormalized";
+		case Format::UFLOAT11_UFLOAT11_UFLOAT10: return "UFLOAT11_UFLOAT11_UFLOAT10";
+		case Format::UFLOAT9_UFLOAT9_UFLOAT9_UFLOAT5: return "UFLOAT9_UFLOAT9_UFLOAT9_UFLOAT5";
+		case Format::BYTE_BYTE_BYTE_BYTE_sRGB: return "BYTE_BYTE_BYTE_BYTE_sRGB";
+		case Format::BYTE_BYTE_BYTE_BYTE_BGRA: return "BYTE_BYTE_BYTE_BYTE_BGRA";
+		case Format::BYTE_BYTE_BYTE_BYTE_BGRA_sRGB: return "BYTE_BYTE_BYTE_BYTE_BGRA_sRGB";
+		case Format::BYTE_BYTE_BYTE_BYTE_NotNormalized: return "BYTE_BYTE_BYTE_BYTE_NotNormalized";
+		case Format::BYTE_BYTE_NotNormalized: return "BYTE_BYTE_NotNormalized";
+		case Format::BYTE_NotNormalized: return "BYTE_NotNormalized";
+		case Format::INT8_NotNormalized: return "INT8_NotNormalized";
+		case Format::INT8_INT8_NotNormalized: return "INT8_INT8_NotNormalized";
+		case Format::INT8_INT8_INT8_INT8_NotNormalized: return "INT8_INT8_INT8_INT8_NotNormalized";
+		case Format::UINT16_NotNormalized: return "UINT16_NotNormalized";
+		case Format::UINT16_UINT16_NotNormalized: return "UINT16_UINT16_NotNormalized";
+		case Format::UINT16_UINT16_UINT16_UINT16_NotNormalized: return "UINT16_UINT16_UINT16_UINT16_NotNormalized";
+		case Format::INT16_NotNormalized: return "INT16_NotNormalized";
+		case Format::INT16_INT16_NotNormalized: return "INT16_INT16_NotNormalized";
+		case Format::INT16_INT16_INT16_INT16_NotNormalized: return "INT16_INT16_INT16_INT16_NotNormalized";
+		case Format::UINT32_NotNormalized: return "UINT32_NotNormalized";
+		case Format::UINT32_UINT32_NotNormalized: return "UINT32_UINT32_NotNormalized";
+		case Format::UINT32_UINT32_UINT32_NotNormalized: return "UINT32_UINT32_UINT32_NotNormalized";
+		case Format::UINT32_UINT32_UINT32_UINT32_NotNormalized: return "UINT32_UINT32_UINT32_UINT32_NotNormalized";
+		case Format::INT32_NotNormalized: return "INT32_NotNormalized";
+		case Format::INT32_INT32_NotNormalized: return "INT32_INT32_NotNormalized";
+		case Format::INT32_INT32_INT32_NotNormalized: return "INT32_INT32_INT32_NotNormalized";
+		case Format::INT32_INT32_INT32_INT32_NotNormalized: return "INT32_INT32_INT32_INT32_NotNormalized";
+		case Format::BC1: return "BC1";
+		case Format::BC1_sRGB: return "BC1_sRGB";
+		case Format::BC2: return "BC2";
+		case Format::BC2_sRGB: return "BC2_sRGB";
+		case Format::BC3: return "BC3";
+		case Format::BC3_sRGB: return "BC3_sRGB";
+		case Format::BC4_UNSIGNED: return "BC4_UNSIGNED";
+		case Format::BC4_SIGNED: return "BC4_SIGNED";
+		case Format::BC5_UNSIGNED: return "BC5_UNSIGNED";
+		case Format::BC5_SIGNED: return "BC5_SIGNED";
+		case Format::BC6H_UFLOAT16: return "BC6H_UFLOAT16";
+		case Format::BC6H_SFLOAT16: return "BC6H_SFLOAT16";
+		case Format::BC7: return "BC7";
+		case Format::BC7_sRGB: return "BC7_sRGB";
+		case Format::DEPTHFORMAT_UINT16: return "DEPTHFORMAT_UINT16";
+		case Format::DEPTHFORMAT_UINT24_BYTE: return "DEPTHFORMAT_UINT24_BYTE";
+		case Format::DEPTHFORMAT_FLOAT: return "DEPTHFORMAT_FLOAT";
+		case Format::DEPTHFORMAT_FLOAT_BYTE: return "DEPTHFORMAT_FLOAT_BYTE";
+
+		default:
+			return "Unknown";
+		};
+	}
+
+	const char* GetKeyName(Key key)
+	{
+		switch (key)
+		{
+		case Key::Unknown: return "Unknown";
+
+		case Key::A: return "A"; case Key::B: return "B"; case Key::C: return "C"; case Key::D: return "D"; case Key::E: return "E";
+		case Key::F: return "F"; case Key::G: return "G"; case Key::H: return "H"; case Key::I: return "I"; case Key::J: return "J";
+		case Key::K: return "K"; case Key::L: return "L"; case Key::M: return "M"; case Key::N: return "N"; case Key::O: return "O";
+		case Key::P: return "P"; case Key::Q: return "Q"; case Key::R: return "R"; case Key::S: return "S"; case Key::T: return "T";
+		case Key::U: return "U"; case Key::V: return "V"; case Key::W: return "W"; case Key::X: return "X"; case Key::Y: return "Y";
+		case Key::Z: return "Z";
+
+		case Key::Num0: return "Num0"; case Key::Num1: return "Num1"; case Key::Num2: return "Num2"; case Key::Num3: return "Num3";
+		case Key::Num4: return "Num4"; case Key::Num5: return "Num5"; case Key::Num6: return "Num6"; case Key::Num7: return "Num7";
+		case Key::Num8: return "Num8"; case Key::Num9: return "Num9";
+
+		case Key::Numpad0: return "Numpad0"; case Key::Numpad1: return "Numpad1"; case Key::Numpad2: return "Numpad2";
+		case Key::Numpad3: return "Numpad3"; case Key::Numpad4: return "Numpad4"; case Key::Numpad5: return "Numpad5";
+		case Key::Numpad6: return "Numpad6"; case Key::Numpad7: return "Numpad7"; case Key::Numpad8: return "Numpad8";
+		case Key::Numpad9: return "Numpad9";
+
+		case Key::F1: return "F1"; case Key::F2: return "F2"; case Key::F3: return "F3"; case Key::F4: return "F4";
+		case Key::F5: return "F5"; case Key::F6: return "F6"; case Key::F7: return "F7"; case Key::F8: return "F8";
+		case Key::F9: return "F9"; case Key::F10: return "F10"; case Key::F11: return "F11"; case Key::F12: return "F12";
+		case Key::F13: return "F13"; case Key::F14: return "F14"; case Key::F15: return "F15"; case Key::F16: return "F16";
+		case Key::F17: return "F17"; case Key::F18: return "F18"; case Key::F19: return "F19"; case Key::F20: return "F20";
+		case Key::F21: return "F21"; case Key::F22: return "F22"; case Key::F23: return "F23"; case Key::F24: return "F24";
+
+		case Key::LeftShift: return "LeftShift"; case Key::RightShift: return "RightShift";
+		case Key::LeftControl: return "LeftControl"; case Key::RightControl: return "RightControl";
+		case Key::LeftAlt: return "LeftAlt"; case Key::RightAlt: return "RightAlt";
+		case Key::LeftSystem: return "LeftSystem"; case Key::RightSystem: return "RightSystem";
+
+		case Key::Backspace: return "Backspace"; case Key::Tab: return "Tab"; case Key::Clear: return "Clear";
+		case Key::Enter: return "Enter"; case Key::Pause: return "Pause"; case Key::CapsLock: return "CapsLock";
+		case Key::Escape: return "Escape"; case Key::Space: return "Space"; case Key::PageUp: return "PageUp";
+		case Key::PageDown: return "PageDown"; case Key::End: return "End"; case Key::Home: return "Home";
+
+		case Key::Left: return "Left"; case Key::Up: return "Up"; case Key::Right: return "Right"; case Key::Down: return "Down";
+		case Key::PrintScreen: return "PrintScreen"; case Key::Insert: return "Insert"; case Key::Delete: return "Delete";
+
+		case Key::Sleep: return "Sleep"; case Key::Multiply: return "Multiply"; case Key::Add: return "Add";
+		case Key::Separator: return "Separator"; case Key::Subtract: return "Subtract";
+		case Key::Decimal: return "Decimal"; case Key::Divide: return "Divide";
+
+		case Key::NumLock: return "NumLock"; case Key::ScrollLock: return "ScrollLock";
+
+		case Key::Apps: return "Apps";
+
+		case Key::VolumeMute: return "VolumeMute"; case Key::VolumeDown: return "VolumeDown"; case Key::VolumeUp: return "VolumeUp";
+		case Key::MediaNextTrack: return "MediaNextTrack"; case Key::MediaPrevTrack: return "MediaPrevTrack";
+		case Key::MediaStop: return "MediaStop"; case Key::MediaPlayPause: return "MediaPlayPause";
+
+		case Key::Plus: return "Plus"; case Key::Comma: return "Comma"; case Key::Minus: return "Minus"; case Key::Period: return "Period";
+
+		case Key::OEM_1: return "OEM_1"; case Key::OEM_2: return "OEM_2"; case Key::OEM_3: return "OEM_3"; case Key::OEM_4: return "OEM_4";
+		case Key::OEM_5: return "OEM_5"; case Key::OEM_6: return "OEM_6"; case Key::OEM_7: return "OEM_7"; case Key::OEM_8: return "OEM_8";
+		case Key::OEM_102: return "OEM_102";
+
+		default:
+			return "<Unsupported key>";
+		}
+	}
+
+	bool IGLOContext::IsMouseButtonDown(MouseButton button) const
+	{
+		if (button == MouseButton::None) return false;
+		return mouseButtonIsDown.GetAt((uint64_t)button);
+	}
+
+	bool IGLOContext::IsKeyDown(Key key) const
+	{
+		if (key == Key::Unknown) return false;
+		return keyIsDown.GetAt((uint64_t)key);
+	}
+
+	void IGLOContext::SetWindowSize(uint32_t width, uint32_t height)
+	{
+		uint32_t cappedWidth = width;
+		uint32_t cappedHeight = height;
+
+		Extent2D minSize = windowResizeConstraints.minSize;
+		Extent2D maxSize = windowResizeConstraints.maxSize;
+		if (cappedWidth < minSize.width && minSize.width != 0) cappedWidth = minSize.width;
+		if (cappedHeight < minSize.height && minSize.height != 0) cappedHeight = minSize.height;
+		if (cappedWidth > maxSize.width && maxSize.width != 0) cappedWidth = maxSize.width;
+		if (cappedHeight > maxSize.height && maxSize.height != 0) cappedHeight = maxSize.height;
+
+		if (windowedMode.size == Extent2D(cappedWidth, cappedHeight)) return;
+		windowedMode.size = Extent2D(cappedWidth, cappedHeight);
+
+		if (displayMode == DisplayMode::Windowed)
+		{
+			Impl_SetWindowSize(cappedWidth, cappedHeight);
+		}
+	}
+
+	void IGLOContext::SetWindowPosition(int32_t x, int32_t y)
+	{
+		if (windowedMode.pos == IntPoint(x, y)) return;
+		windowedMode.pos = IntPoint(x, y);
+
+		if (displayMode == DisplayMode::Windowed)
+		{
+			Impl_SetWindowPosition(x, y);
+		}
+	}
+
+	void IGLOContext::SetWindowResizable(bool resizable)
+	{
+		if (windowedMode.resizable == resizable) return;
+		windowedMode.resizable = resizable;
+
+		if (displayMode == DisplayMode::Windowed)
+		{
+			Impl_SetWindowResizable(resizable);
+		}
+	}
+
+	void IGLOContext::SetWindowBordersVisible(bool visible)
+	{
+		if (windowedMode.bordersVisible == visible) return;
+		windowedMode.bordersVisible = visible;
+
+		if (displayMode == DisplayMode::Windowed)
+		{
+			Impl_SetWindowBordersVisible(visible);
+		}
+	}
+
+	void IGLOContext::SetWindowVisible(bool visible)
+	{
+		if (windowedMode.visible == visible) return;
+		windowedMode.visible = visible;
+
+		if (displayMode == DisplayMode::Windowed)
+		{
+			Impl_SetWindowVisible(visible);
+		}
+	}
+
+	void IGLOContext::SetWindowIconFromImage(const Image& icon)
+	{
+		FormatInfo info = GetFormatInfo(icon.GetFormat());
+		uint32_t bitsPerPixel = info.bytesPerPixel * 8;
+		uint32_t numChannels = info.elementCount;
+		if (bitsPerPixel != 32 || numChannels != 4)
+		{
+			Log(LogType::Error, "Failed to set window icon. Reason: Icon must have 4 color channels and be 32 bits per pixel.");
+			return;
+		}
+
+		// Convert RGBA to BGRA if needed
+		std::unique_ptr<Image> iconBGRA;
+		if (icon.GetFormat() == Format::BYTE_BYTE_BYTE_BYTE ||
+			icon.GetFormat() == Format::BYTE_BYTE_BYTE_BYTE_sRGB)
+		{
+			iconBGRA = Image::Create(icon.GetDesc());
+			memcpy(iconBGRA->GetPixels(), icon.GetPixels(), icon.GetSize());
+			iconBGRA->SwapRedBlue();
+		}
+
+		const uint32_t* pixels = iconBGRA
+			? (uint32_t*)iconBGRA->GetPixels()
+			: (uint32_t*)icon.GetPixels();
+		Impl_SetWindowIconFromImage_BGRA(icon.GetExtent(), pixels);
+	}
+
+	void IGLOContext::ToggleFullscreen()
+	{
+		if (displayMode == DisplayMode::Windowed)
+		{
+			EnterFullscreenMode();
+		}
+		else
+		{
+			EnterWindowedMode(windowedMode.size.width, windowedMode.size.height);
+		}
+	}
+
+	Pipeline::~Pipeline()
+	{
+		Impl_Destroy();
+	}
+
+	std::unique_ptr<Pipeline> Pipeline::CreateGraphics(const IGLOContext& context, const PipelineDesc& desc)
+	{
+		const char* errStr = "Failed to create graphics pipeline state. Reason: ";
+
+		if (desc.blendStates.size() > MAX_SIMULTANEOUS_RENDER_TARGETS)
+		{
+			Log(LogType::Error, ToString(errStr, "Too many blend states provided."));
+			return nullptr;
+		}
+
+		if (desc.renderTargetDesc.colorFormats.size() > MAX_SIMULTANEOUS_RENDER_TARGETS)
+		{
+			Log(LogType::Error, ToString(errStr, "Too many color formats provided in the render target description."));
+			return nullptr;
+		}
+
+		std::unique_ptr<Pipeline> out = std::unique_ptr<Pipeline>(new Pipeline(context, desc.primitiveTopology, false));
+
+		DetailedResult result = out->Impl_CreateGraphics(desc);
+		if (!result)
+		{
+			Log(LogType::Error, errStr + result.errorMessage);
+			return nullptr;
+		}
+
+		return out;
+	}
+
+	std::unique_ptr<Pipeline> Pipeline::CreateCompute(const IGLOContext& context, const Shader& CS)
+	{
+		std::unique_ptr<Pipeline> out = std::unique_ptr<Pipeline>(new Pipeline(context, PrimitiveTopology::Undefined, true));
+
+		DetailedResult result = out->Impl_CreateCompute(CS);
+		if (!result)
+		{
+			Log(LogType::Error, "Failed to create compute pipeline state. Reason: " + result.errorMessage);
+			return nullptr;
+		}
+
+		return out;
+	}
+
+	std::unique_ptr<Pipeline> Pipeline::LoadFromFile(const IGLOContext& context,
+		const std::string& filepathVS, const std::string& entryPointNameVS,
+		const std::string& filepathPS, const std::string& entryPointNamePS,
+		const RenderTargetDesc& renderTargetDesc, const std::vector<VertexElement>& vertexLayout,
+		PrimitiveTopology primitiveTopology, DepthDesc depth, RasterizerDesc rasterizer, const std::vector<BlendDesc>& blend)
+	{
+		const char* errStr = "Failed to create graphics pipeline state. Reason: ";
+
+		if (filepathVS.empty() || filepathPS.empty())
+		{
+			Log(LogType::Error, ToString(errStr, "Couldn't read shader bytecode from file because empty filepath was provided."));
+			return nullptr;
+		}
+
+		// Vertex shader
+		ReadFileResult VS = ReadFile(filepathVS);
+		if (!VS.success)
+		{
+			Log(LogType::Error, ToString(errStr, "Failed to read shader bytecode from file '", filepathVS, "'."));
+			return nullptr;
+		}
+
+		// Pixel shader
+		ReadFileResult PS = ReadFile(filepathPS);
+		if (!PS.success)
+		{
+			Log(LogType::Error, ToString(errStr, "Failed to read shader bytecode from file '", filepathPS, "'."));
+			return nullptr;
+		}
+
+		return CreateGraphics(context,
+			Shader(VS.fileContent, entryPointNameVS),
+			Shader(PS.fileContent, entryPointNamePS),
+			renderTargetDesc, vertexLayout,
+			primitiveTopology, depth, rasterizer, blend);
+	}
+
+	std::unique_ptr<Pipeline> Pipeline::CreateGraphics(const IGLOContext& context,
+		const Shader& VS, const Shader& PS,
+		const RenderTargetDesc& renderTargetDesc, const std::vector<VertexElement>& vertexLayout,
+		PrimitiveTopology primitiveTopology, DepthDesc depth, RasterizerDesc rasterizer, const std::vector<BlendDesc>& blend)
+	{
+		PipelineDesc desc =
+		{
+			.VS = VS,
+			.PS = PS,
+			.blendStates = blend,
+			.rasterizerState = rasterizer,
+			.depthState = depth,
+			.vertexLayout = vertexLayout,
+			.primitiveTopology = primitiveTopology,
+			.renderTargetDesc = renderTargetDesc,
+		};
+		return CreateGraphics(context, desc);
+	}
+
+	void DescriptorHeap::PersistentIndexAllocator::Reset(uint32_t maxIndices)
+	{
+		this->maxIndices = maxIndices;
+		this->allocationCount = 0;
+
+		this->freed.clear();
+		this->freed.shrink_to_fit();
+		this->freed.reserve(maxIndices);
+
+		this->isAllocated.Clear();
+		this->isAllocated.Resize(maxIndices, false);
+	}
+
+	void DescriptorHeap::PersistentIndexAllocator::Clear()
+	{
+		maxIndices = 0;
+		allocationCount = 0;
+
+		freed.clear();
+		freed.shrink_to_fit();
+
+		isAllocated.Clear();
+	}
+
+	uint32_t DescriptorHeap::PersistentIndexAllocator::Allocate()
+	{
+		if (allocationCount >= maxIndices)
+		{
+			Fatal(ToString("Failed to allocate persistent descriptor. Reason: Ran out of persistent descriptors ",
+				"(", allocationCount, "/", maxIndices, ")"));
+		}
+
+		uint32_t index;
+		if (!freed.empty())
+		{
+			index = freed.back();
+			freed.pop_back();
+		}
+		else
+		{
+			index = allocationCount;
+		}
+		allocationCount++;
+
+		if (isAllocated.GetAt(index))
+		{
+			Fatal(ToString("The newly allocated persistent descriptor (index=", index, ") was already allocated!"));
+		}
+		isAllocated.SetTrue(index);
+
+		return index;
+	}
+
+	void DescriptorHeap::PersistentIndexAllocator::Free(uint32_t index)
+	{
+		const char* errStr = "Failed to free persistent descriptor. Reason: ";
+
+		if (index >= maxIndices) Fatal(ToString(errStr, "Index out of range (", index, ">=", maxIndices, ")"));
+		if (allocationCount == 0) Fatal(ToString(errStr, "No persistent descriptors are even allocated to begin with."));
+
+		if (!isAllocated.GetAt(index)) Fatal(ToString(errStr, "Index (", index, ") wasn't allocated to begin with. Double free detected?"));
+		isAllocated.SetFalse(index);
+
+		freed.push_back(index);
+		allocationCount--;
+	}
+
+	void DescriptorHeap::TempIndexAllocator::Reset(uint32_t maxIndices, uint32_t offset)
+	{
+		this->maxIndices = maxIndices;
+		this->allocationCount = 0;
+		this->offset = offset;
+	}
+
+	void DescriptorHeap::TempIndexAllocator::Clear()
+	{
+		maxIndices = 0;
+		allocationCount = 0;
+	}
+
+	uint32_t DescriptorHeap::TempIndexAllocator::Allocate()
+	{
+		if (allocationCount >= maxIndices)
+		{
+			Fatal(ToString("Failed to allocate temp descriptor. Reason: Ran out of temp descriptors ",
+				"(", allocationCount, "/", maxIndices, ")"));
+		}
+
+		uint32_t index = allocationCount;
+		allocationCount++;
+		return index + offset;
+	}
+
+	void DescriptorHeap::TempIndexAllocator::FreeAllIndices()
+	{
+		allocationCount = 0;
+	}
+
+	DescriptorHeap::~DescriptorHeap()
+	{
+		if (persResourceIndices.GetAllocationCount() > 0)
+		{
+			Log(LogType::Warning, ToString(persResourceIndices.GetAllocationCount(),
+				" unfreed persistent resource descriptor(s) detected."));
+		}
+		if (persSamplerIndices.GetAllocationCount() > 0)
+		{
+			Log(LogType::Warning, ToString(persSamplerIndices.GetAllocationCount(),
+				" unfreed sampler descriptor(s) detected."));
+		}
+
+		Impl_Destroy();
+	}
+
+	uint32_t DescriptorHeap::CalcTotalResDescriptors(uint32_t maxPersistent, uint32_t maxTempPerFrame, uint32_t maxFramesInFlight)
+	{
+		return maxPersistent + (maxTempPerFrame * maxFramesInFlight);
+	}
+
+	std::pair<std::unique_ptr<DescriptorHeap>, DetailedResult> DescriptorHeap::Create(const IGLOContext& context,
+		uint32_t maxPersistentResources, uint32_t maxTempResourcesPerFrame, uint32_t maxSamplers, uint32_t maxFramesInFlight)
+	{
+		std::unique_ptr<DescriptorHeap> out = std::unique_ptr<DescriptorHeap>(new DescriptorHeap(context, maxFramesInFlight));
+
+		// Resource descriptor indices are partitioned like this:
+		// [maxPersistent][maxTemporaryPerFrame frame 0][maxTemporaryPerFrame frame 1][maxTemporaryPerFrame frame N...]
+		out->persResourceIndices.Reset(maxPersistentResources);
+		out->persSamplerIndices.Reset(maxSamplers);
+		out->tempResourceIndices.resize(maxFramesInFlight);
+		for (uint32_t i = 0; i < maxFramesInFlight; i++)
+		{
+			uint32_t offset = maxPersistentResources + (i * maxTempResourcesPerFrame);
+			out->tempResourceIndices[i].Reset(maxTempResourcesPerFrame, offset);
+		}
+
+		DetailedResult result = out->Impl_Create(maxPersistentResources, maxTempResourcesPerFrame, maxSamplers);
+		if (!result)
+		{
+			return { nullptr, result };
+		}
+
+		return { std::move(out), DetailedResult::Success() };
+	}
+
+	void DescriptorHeap::NextFrame()
+	{
+		lastFrameStats = GetCurrentStats();
+
+		frameIndex = (frameIndex + 1) % maxFramesInFlight;
+
+		assert(frameIndex < tempResourceIndices.size());
+		tempResourceIndices[frameIndex].FreeAllIndices();
+
+		Impl_NextFrame();
+	}
+
+	void DescriptorHeap::FreeAllTempResources()
+	{
+		for (size_t i = 0; i < tempResourceIndices.size(); i++)
+		{
+			tempResourceIndices[i].FreeAllIndices();
+		}
+
+		Impl_FreeAllTempResources();
+	}
+
+	DescriptorHeap::Stats DescriptorHeap::GetCurrentStats() const
+	{
+		assert(frameIndex < tempResourceIndices.size());
+
+		Stats out;
+		out.maxPersistentResources = persResourceIndices.GetMaxIndices();
+		out.maxTempResources = tempResourceIndices[frameIndex].GetMaxIndices();
+		out.maxSamplers = persSamplerIndices.GetMaxIndices();
+		out.livePersistentResources = persResourceIndices.GetAllocationCount();
+		out.liveTempResources = tempResourceIndices[frameIndex].GetAllocationCount();
+		out.liveSamplers = persSamplerIndices.GetAllocationCount();
+		return out;
+	}
+
+	Descriptor DescriptorHeap::AllocatePersistent(DescriptorType descriptorType)
+	{
+		PersistentIndexAllocator& allocator = (descriptorType == DescriptorType::Sampler) ? persSamplerIndices : persResourceIndices;
+		uint32_t out = allocator.Allocate();
+		return Descriptor(out, descriptorType);
+	}
+
+	Descriptor DescriptorHeap::AllocateTemp(DescriptorType descriptorType)
+	{
+		assert(descriptorType != DescriptorType::Sampler && "temp samplers are not supported");
+		assert(frameIndex < tempResourceIndices.size());
+
+		TempIndexAllocator& allocator = tempResourceIndices[frameIndex];
+
+		uint32_t out = allocator.Allocate();
+		return Descriptor(out, descriptorType);
+	}
+
+	void DescriptorHeap::FreePersistent(Descriptor descriptor)
+	{
+		if (!descriptor) Fatal("Attempted to free a null persistent descriptor!");
+
+		if (descriptor.type == DescriptorType::Sampler)
+		{
+			persSamplerIndices.Free(descriptor.heapIndex);
+		}
+		else
+		{
+			persResourceIndices.Free(descriptor.heapIndex);
+		}
+	}
+
+	CommandList::~CommandList()
+	{
+		Impl_Destroy();
+	}
+
+	std::unique_ptr<CommandList> CommandList::Create(const IGLOContext& context, CommandListType commandListType)
+	{
+		uint32_t maxFrames = context.GetMaxFramesInFlight();
+
+		std::unique_ptr<CommandList> out = std::unique_ptr<CommandList>(new CommandList(context, commandListType, maxFrames));
+
+		DetailedResult result = out->Impl_Create();
+		if (!result)
+		{
+			Log(LogType::Error, "Failed to create command list. Reason: " + result.errorMessage);
+			return nullptr;
+		}
+
+		return out;
+	}
+
+	void CommandList::Begin()
+	{
+		// Advance to next frame
+		frameIndex = (frameIndex + 1) % maxFrames;
+
+		Impl_Begin();
+	}
+
+	void CommandList::End()
+	{
+		Impl_End();
+	}
+
+	SimpleBarrierInfo GetSimpleBarrierInfo(SimpleBarrier simpleBarrier, CommandListType queueType)
+	{
+		SimpleBarrierInfo out;
+		out.discard = (simpleBarrier == SimpleBarrier::Discard);
+
+		bool isGraphicsQueue = (queueType == CommandListType::Graphics);
+		bool isComputeQueue = (queueType == CommandListType::Compute);
+#ifdef IGLO_D3D12
+		bool isCopyQueue = (queueType == CommandListType::Copy);
+#endif
+
+		switch (simpleBarrier)
+		{
+		default:
+			Fatal("Invalid SimpleBarrier.");
+
+			// In D3D12, 'Present' and 'Common' layouts share the same enum value (0).
+			// We distinguish them here as separate to provide the option of not using queue-specific layouts.
+			// Queue-specific layouts (e.g., _GraphicsQueue_Common) are incompatible with backbuffers.
+		case SimpleBarrier::Common:
+			out.sync = BarrierSync::All;
+			out.access = BarrierAccess::Common;
+			out.layout = BarrierLayout::Common;
+			if (isGraphicsQueue) out.layout = BarrierLayout::_GraphicsQueue_Common;
+			if (isComputeQueue) out.layout = BarrierLayout::_ComputeQueue_Common;
+			break;
+
+		case SimpleBarrier::Present:
+			out.sync = BarrierSync::All;
+			out.access = BarrierAccess::Common;
+			out.layout = BarrierLayout::Present;
+			break;
+
+		case SimpleBarrier::Discard:
+			out.sync = BarrierSync::None;
+			out.access = BarrierAccess::NoAccess;
+			out.layout = BarrierLayout::Undefined;
+			break;
+
+		case SimpleBarrier::PixelShaderResource:
+			out.sync = BarrierSync::PixelShading;
+			out.access = BarrierAccess::ShaderResource;
+			out.layout = BarrierLayout::ShaderResource;
+			if (queueType == CommandListType::Compute)
+			{
+				out.sync = BarrierSync::None;
+				out.access = BarrierAccess::NoAccess;
+			}
+			if (isGraphicsQueue) out.layout = BarrierLayout::_GraphicsQueue_ShaderResource;
+			if (isComputeQueue) out.layout = BarrierLayout::_ComputeQueue_ShaderResource;
+			break;
+
+		case SimpleBarrier::ComputeShaderResource:
+			out.sync = BarrierSync::ComputeShading;
+			out.access = BarrierAccess::ShaderResource;
+			out.layout = BarrierLayout::ShaderResource;
+			if (isGraphicsQueue) out.layout = BarrierLayout::_GraphicsQueue_ShaderResource;
+			if (isComputeQueue) out.layout = BarrierLayout::_ComputeQueue_ShaderResource;
+			break;
+
+		case SimpleBarrier::ComputeShaderUnorderedAccess:
+			out.sync = BarrierSync::ComputeShading;
+			out.access = BarrierAccess::UnorderedAccess;
+			out.layout = BarrierLayout::UnorderedAccess;
+			if (isGraphicsQueue) out.layout = BarrierLayout::_GraphicsQueue_UnorderedAccess;
+			if (isComputeQueue) out.layout = BarrierLayout::_ComputeQueue_UnorderedAccess;
+			break;
+
+		case SimpleBarrier::RenderTarget:
+			out.sync = BarrierSync::RenderTarget;
+			out.access = BarrierAccess::RenderTarget;
+			out.layout = BarrierLayout::RenderTarget;
+			break;
+
+		case SimpleBarrier::DepthWrite:
+			out.sync = BarrierSync::DepthStencil;
+			out.access = BarrierAccess::DepthStencilWrite;
+			out.layout = BarrierLayout::DepthStencilWrite;
+			break;
+
+		case SimpleBarrier::DepthRead:
+			out.sync = BarrierSync::DepthStencil;
+			out.access = BarrierAccess::DepthStencilRead;
+			out.layout = BarrierLayout::DepthStencilRead;
+			break;
+
+		case SimpleBarrier::CopySource:
+			out.sync = BarrierSync::Copy;
+			out.access = BarrierAccess::CopySource;
+			out.layout = BarrierLayout::CopySource;
+			if (isGraphicsQueue) out.layout = BarrierLayout::_GraphicsQueue_CopySource;
+			if (isComputeQueue) out.layout = BarrierLayout::_ComputeQueue_CopySource;
+			break;
+
+		case SimpleBarrier::CopyDest:
+			out.sync = BarrierSync::Copy;
+			out.access = BarrierAccess::CopyDest;
+			out.layout = BarrierLayout::CopyDest;
+			if (isGraphicsQueue) out.layout = BarrierLayout::_GraphicsQueue_CopyDest;
+			if (isComputeQueue) out.layout = BarrierLayout::_ComputeQueue_CopyDest;
+#ifdef IGLO_D3D12
+			if (isCopyQueue) out.layout = BarrierLayout::Common;
+#endif
+			break;
+
+		case SimpleBarrier::ResolveSource:
+			out.sync = BarrierSync::Resolve;
+			out.access = BarrierAccess::ResolveSource;
+			out.layout = BarrierLayout::ResolveSource;
+			break;
+
+		case SimpleBarrier::ResolveDest:
+			out.sync = BarrierSync::Resolve;
+			out.access = BarrierAccess::ResolveDest;
+			out.layout = BarrierLayout::ResolveDest;
+			break;
+
+		case SimpleBarrier::ClearUnorderedAccess:
+			out.sync = BarrierSync::ClearUnorderedAccessView;
+			out.access = BarrierAccess::UnorderedAccess;
+			out.layout = BarrierLayout::UnorderedAccess;
+			if (isGraphicsQueue) out.layout = BarrierLayout::_GraphicsQueue_UnorderedAccess;
+			if (isComputeQueue) out.layout = BarrierLayout::_ComputeQueue_UnorderedAccess;
+			break;
+
+		case SimpleBarrier::ClearInactiveRenderTarget:
+#ifdef IGLO_D3D12
+			out.sync = BarrierSync::RenderTarget;
+			out.access = BarrierAccess::RenderTarget;
+			out.layout = BarrierLayout::RenderTarget;
+#endif
+#ifdef IGLO_VULKAN
+			out.sync = BarrierSync::Copy;
+			out.access = BarrierAccess::CopyDest;
+			out.layout = BarrierLayout::CopyDest;
+#endif
+			break;
+		}
+
+		return out;
+	}
+
+	void CommandList::AddTextureBarrier(const Texture& texture, SimpleBarrier before, SimpleBarrier after)
+	{
+		SimpleBarrierInfo infoBefore = GetSimpleBarrierInfo(before, commandListType);
+		SimpleBarrierInfo infoAfter = GetSimpleBarrierInfo(after, commandListType);
+		AddTextureBarrier(texture, infoBefore.sync, infoAfter.sync, infoBefore.access, infoAfter.access, infoBefore.layout, infoAfter.layout);
+	}
+
+	void CommandList::AddTextureBarrierAtSubresource(const Texture& texture, SimpleBarrier before, SimpleBarrier after,
+		uint32_t faceIndex, uint32_t mipIndex)
+	{
+		SimpleBarrierInfo infoBefore = GetSimpleBarrierInfo(before, commandListType);
+		SimpleBarrierInfo infoAfter = GetSimpleBarrierInfo(after, commandListType);
+		AddTextureBarrierAtSubresource(texture, infoBefore.sync, infoAfter.sync, infoBefore.access, infoAfter.access,
+			infoBefore.layout, infoAfter.layout, faceIndex, mipIndex);
+	}
+
+	void CommandList::SetRenderTarget(const Texture* renderTexture, const Texture* depthBuffer, bool optimizedClear)
+	{
+		if (renderTexture)
+		{
+			const Texture* renderTextures[] = { renderTexture };
+			SetRenderTargets(renderTextures, 1, depthBuffer, optimizedClear);
+		}
+		else
+		{
+			SetRenderTargets(nullptr, 0, depthBuffer, optimizedClear);
+		}
+	}
+
+	void CommandList::SetRenderTargets(const Texture* const* renderTextures, uint32_t numRenderTextures,
+		const Texture* depthBuffer, bool optimizedClear)
+	{
+		if (numRenderTextures > 0)
+		{
+			assert(renderTextures != nullptr);
+		}
+		assert(numRenderTextures <= MAX_SIMULTANEOUS_RENDER_TARGETS && "too many render textures provided");
+
+		Impl_SetRenderTargets(renderTextures, numRenderTextures, depthBuffer, optimizedClear);
+	}
+
+	void CommandList::ClearColor(const Texture& renderTexture, Color color, uint32_t numRects, const IntRect* rects)
+	{
+		if (numRects > 0)
+		{
+			assert(rects != nullptr);
+		}
+		Impl_ClearColor(renderTexture, color, numRects, rects);
+	}
+
+	void CommandList::ClearDepth(const Texture& depthBuffer, float depth, byte stencil, bool clearDepth, bool clearStencil,
+		uint32_t numRects, const IntRect* rects)
+	{
+		if (numRects > 0)
+		{
+			assert(rects != nullptr);
+		}
+		Impl_ClearDepth(depthBuffer, depth, stencil, clearDepth, clearStencil, numRects, rects);
+	}
+
+	void CommandList::ClearUnorderedAccessBufferUInt32(const Buffer& buffer, const uint32_t value)
+	{
+		assert(buffer.GetUsage() == BufferUsage::UnorderedAccess);
+		Impl_ClearUnorderedAccessBufferUInt32(buffer, value);
+	}
+
+	void CommandList::ClearUnorderedAccessTextureFloat(const Texture& texture, const float values[4])
+	{
+		assert(texture.GetUsage() == TextureUsage::UnorderedAccess);
+		Impl_ClearUnorderedAccessTextureFloat(texture, values);
+	}
+
+	void CommandList::ClearUnorderedAccessTextureUInt32(const Texture& texture, const uint32_t values[4])
+	{
+		assert(texture.GetUsage() == TextureUsage::UnorderedAccess);
+		Impl_ClearUnorderedAccessTextureUInt32(texture, values);
+	}
+
+	void CommandList::AssertPushConstants(const void* data, uint32_t sizeInBytes, uint32_t destOffsetInBytes)
+	{
+		assert((uint64_t)sizeInBytes + destOffsetInBytes <= MAX_PUSH_CONSTANTS_BYTE_SIZE && "Exceeded max push constants size");
+		assert(sizeInBytes % 4 == 0 && "size must be a multiple of 4");
+		assert(destOffsetInBytes % 4 == 0 && "offset must be a multiple of 4");
+		assert(data != nullptr);
+		assert(sizeInBytes > 0);
+	}
+
+	void CommandList::SetPushConstants(const void* data, uint32_t sizeInBytes, uint32_t destOffsetInBytes)
+	{
+		AssertPushConstants(data, sizeInBytes, destOffsetInBytes);
+		Impl_SetPushConstants(data, sizeInBytes, destOffsetInBytes);
+	}
+
+	void CommandList::SetComputePushConstants(const void* data, uint32_t sizeInBytes, uint32_t destOffsetInBytes)
+	{
+		AssertPushConstants(data, sizeInBytes, destOffsetInBytes);
+		Impl_SetComputePushConstants(data, sizeInBytes, destOffsetInBytes);
+	}
+
+	void CommandList::SetVertexBuffer(const Buffer& vertexBuffer, uint32_t slot)
+	{
+		const Buffer* buffers[] = { &vertexBuffer };
+		SetVertexBuffers(buffers, 1, slot);
+	}
+
+	void CommandList::SetVertexBuffers(const Buffer* const* vertexBuffers, uint32_t count, uint32_t startSlot)
+	{
+		assert(count > 0);
+		assert(vertexBuffers != nullptr);
+		assert(count + startSlot <= MAX_VERTEX_BUFFER_BIND_SLOTS);
+
+		Impl_SetVertexBuffers(vertexBuffers, count, startSlot);
+	}
+
+	void CommandList::SetTempVertexBuffer(const void* data, uint64_t sizeInBytes, uint32_t vertexStride, uint32_t slot)
+	{
+		assert(slot < MAX_VERTEX_BUFFER_BIND_SLOTS);
+
+		TempBuffer vb = context.GetUploadHeap().AllocateTempBuffer(sizeInBytes,
+			context.GetGraphicsSpecs().bufferPlacementAlignments.vertexOrIndexBuffer);
+
+		memcpy(vb.data, data, sizeInBytes);
+
+#ifdef IGLO_D3D12
+		D3D12_VERTEX_BUFFER_VIEW view = {};
+		view.BufferLocation = vb.impl.resource->GetGPUVirtualAddress() + vb.offset;
+		view.SizeInBytes = (UINT)sizeInBytes;
+		view.StrideInBytes = (UINT)vertexStride;
+		impl.graphicsCommandList->IASetVertexBuffers(slot, 1, &view);
+#endif
+#ifdef IGLO_VULKAN
+		VkBuffer buffer = vb.impl.buffer;
+		VkDeviceSize offset = vb.offset;
+		vkCmdBindVertexBuffers(impl.currentCommandBuffer, slot, 1, &buffer, &offset);
+#endif
+	}
+
+	void CommandList::SetViewport(float width, float height)
+	{
+		Viewport viewport{ .width = width, .height = height };
+		SetViewport(viewport);
+	}
+	void CommandList::SetViewport(Viewport viewPort)
+	{
+		SetViewports(&viewPort, 1);
+	}
+
+	void CommandList::SetScissorRectangle(int32_t width, int32_t height)
+	{
+		SetScissorRectangle(IntRect(0, 0, width, height));
+	}
+	void CommandList::SetScissorRectangle(IntRect scissorRect)
+	{
+		SetScissorRectangles(&scissorRect, 1);
+	}
+
+	void CommandList::CopyTexture(const Texture& source, const Texture& destination)
+	{
+		assert(source.GetUsage() != TextureUsage::Readable && "source texture must not have Readable usage");
+
+		if (destination.GetUsage() == TextureUsage::Readable)
+		{
+			CopyTextureToReadableTexture(source, destination);
+			return;
+		}
+
+		Impl_CopyTexture(source, destination);
+	}
+
+	void CommandList::CopyTextureSubresource(const Texture& source, uint32_t sourceFaceIndex, uint32_t sourceMipIndex,
+		const Texture& destination, uint32_t destFaceIndex, uint32_t destMipIndex)
+	{
+		assert(source.GetUsage() != TextureUsage::Readable && "source texture must not have Readable usage");
+
+		if (destination.GetUsage() == TextureUsage::Readable)
+		{
+			Log(LogType::Error, "Failed to issue a copy texture subresource command."
+				" Reason: The ability to copy a texture subresource to a readable texture subresource is not yet implemented.");
+			return;
+		}
+
+		Impl_CopyTextureSubresource(source, sourceFaceIndex, sourceMipIndex, destination, destFaceIndex, destMipIndex);
+	}
+
+	void CommandList::CopyTextureToReadableTexture(const Texture& source, const Texture& destination)
+	{
+		assert(
+			source.GetUsage() != TextureUsage::Readable &&
+			destination.GetUsage() == TextureUsage::Readable &&
+			"dest must be Readable, source must be non-readable");
+
+		Impl_CopyTextureToReadableTexture(source, destination);
+	}
+
+	void UploadHeap::Page::Free(const IGLOContext& context)
+	{
+		Impl_Free(context);
+
+		mapped = nullptr;
+		sizeInBytes = 0;
+	}
+
+	UploadHeap::~UploadHeap()
+	{
+		for (size_t i = 0; i < perFrame.size(); i++)
+		{
+			// Free large pages
+			for (Page& page : perFrame[i].largePages)
+			{
+				if (!page.IsNull()) page.Free(context);
+			}
+
+			// Free linear pages
+			for (Page& page : perFrame[i].linearPages)
+			{
+				if (!page.IsNull()) page.Free(context);
+			}
+		}
+
+		perFrame.clear();
+	}
+
+	std::pair<std::unique_ptr<UploadHeap>, DetailedResult> UploadHeap::Create(
+		const IGLOContext& context, uint64_t linearPageSize, uint32_t numFramesInFlight)
+	{
+		std::unique_ptr<UploadHeap> out = std::unique_ptr<UploadHeap>(new UploadHeap(
+			context, linearPageSize, numFramesInFlight));
+
+		// Each frame has a set number of persistent pages, and a changing number of temporary pages placed ontop.
+		// The temporary pages are created as needed when the persistent pages run out of space.
+		// The temporary pages are deleted on a per-frame basis.
+		// The persistent pages are reused frame by frame.
+
+		for (size_t i = 0; i < numFramesInFlight; i++)
+		{
+			PerFrame frame;
+			frame.linearNextByte = 0;
+
+			for (size_t p = 0; p < numPersistentPages; p++)
+			{
+				Page page = Page::Create(context, linearPageSize);
+				frame.linearPages.push_back(page);
+			}
+
+			out->perFrame.push_back(frame);
+		}
+
+		out->frameIndex = 0;
+		return { std::move(out), DetailedResult::Success() };
+	}
+
+	void UploadHeap::NextFrame()
+	{
+		lastFrameStats = GetCurrentStats();
+
+		frameIndex = (frameIndex + 1) % numFramesInFlight;
+
+		assert(frameIndex < perFrame.size());
+		FreeTempPagesAtFrame(context, perFrame[frameIndex]);
+	}
+
+	void UploadHeap::FreeAllTempPages()
+	{
+		for (size_t i = 0; i < perFrame.size(); i++)
+		{
+			FreeTempPagesAtFrame(context, perFrame[i]);
+		}
+	}
+
+	void UploadHeap::FreeTempPagesAtFrame(const IGLOContext& context, PerFrame& perFrame)
+	{
+		// Delete extra linear pages
+		while (perFrame.linearPages.size() > numPersistentPages)
+		{
+			perFrame.linearPages.back().Free(context);
+			perFrame.linearPages.pop_back();
+		}
+
+		// Delete large pages
+		for (size_t i = 0; i < perFrame.largePages.size(); i++)
+		{
+			perFrame.largePages[i].Free(context);
+		}
+		perFrame.largePages.clear();
+
+
+		perFrame.linearNextByte = 0;
+	}
+
+	TempBuffer UploadHeap::AllocateTempBuffer(uint64_t sizeInBytes, uint32_t alignment)
+	{
+		assert(frameIndex < perFrame.size());
+		PerFrame& current = perFrame[frameIndex];
+
+		uint64_t alignedStart = AlignUp(current.linearNextByte, (uint64_t)alignment);
+		uint64_t alignedSize = AlignUp(sizeInBytes, (uint64_t)alignment);
+
+		// New large page
+		if (alignedSize > linearPageSize)
+		{
+			Page large = Page::Create(context, alignedSize);
+			current.largePages.push_back(large);
+
+			TempBuffer out;
+			out.offset = 0;
+			out.data = large.mapped;
+			out.impl.Set(large.impl);
+			return out;
+		}
+
+		// New linear page
+		if (alignedStart + alignedSize > linearPageSize)
+		{
+			Page page = Page::Create(context, linearPageSize);
+			current.linearPages.push_back(page);
+			current.linearNextByte = sizeInBytes;
+
+			TempBuffer out;
+			out.offset = 0;
+			out.data = page.mapped;
+			out.impl.Set(page.impl);
+			return out;
+		}
+
+		// Use existing linear page
+		{
+			assert(current.linearPages.size() > 0);
+
+			// Move position forward by actual size, not aligned size.
+			// Aligning the size is only useful for preventing temporary buffer from extending outside bounds.
+			// If code reaches this point, we already know it won't extend too far.
+			current.linearNextByte = alignedStart + sizeInBytes;
+
+			Page& page = current.linearPages.back();
+
+			TempBuffer out;
+			out.offset = alignedStart;
+			out.data = (void*)((size_t)page.mapped + (size_t)alignedStart);
+			out.impl.Set(page.impl);
+			return out;
+		}
+	}
+
+	UploadHeap::Stats UploadHeap::GetCurrentStats() const
+	{
+		static_assert(numPersistentPages > 0);
+		assert(perFrame.at(frameIndex).linearPages.size() > 0);
+
+		Stats out;
+
+		// Num overflow pages
+		{
+			const PerFrame& current = perFrame[frameIndex];
+			out.overflowAllocations = current.largePages.size() + current.linearPages.size() - numPersistentPages;
+		}
+
+		for (const PerFrame& frame : perFrame)
+		{
+			// Page count
+			out.totalPageCount += frame.largePages.size();
+			out.totalPageCount += frame.linearPages.size();
+
+			// Total size
+			for (const Page& page : frame.largePages)
+			{
+				out.totalAllocatedBytes += page.sizeInBytes;
+			}
+			for (const Page& page : frame.linearPages)
+			{
+				out.totalAllocatedBytes += page.sizeInBytes;
+			}
+		}
+
+		// Capacity
+		{
+			const PerFrame& current = perFrame[frameIndex];
+			const Page& page = current.linearPages.back();
+			uint64_t memMax = page.sizeInBytes;
+			uint64_t memUsed = current.linearNextByte;
+			out.capacity = (float)memUsed / (float)memMax;
+		}
+
+		return out;
+	}
+
+	Cursor::~Cursor()
+	{
+		Impl_Destroy();
+	}
+
+	std::unique_ptr<Cursor> Cursor::LoadFromSystem(const IGLOContext& context, SystemCursor systemCursor)
+	{
+		const char* errStr = "Failed to load system cursor. Reason: ";
+
+		std::unique_ptr<Cursor> out = std::unique_ptr<Cursor>(new Cursor(context));
+
+		DetailedResult result = out->Impl_LoadFromSystem(systemCursor);
+		if (!result)
+		{
+			Log(LogType::Error, errStr + result.errorMessage);
+			return nullptr;
+		}
+
+		return out;
+	}
+
+	std::unique_ptr<Cursor> Cursor::LoadFromFile(const IGLOContext& context, const std::string& filename, IntPoint hotspot)
+	{
+		const char* errStr = "Failed to load cursor from file. Reason: ";
+
+		ReadFileResult file = ReadFile(filename);
+		if (!file.success)
+		{
+			Log(LogType::Error, ToString(errStr, "Couldn't open '" + filename + "'."));
+			return nullptr;
+		}
+		if (file.fileContent.size() == 0)
+		{
+			Log(LogType::Error, ToString(errStr, "File '" + filename + "' is empty."));
+			return nullptr;
+		}
+		std::unique_ptr<Image> image = Image::LoadFromMemory(file.fileContent.data(), file.fileContent.size());
+		if (!image)
+		{
+			Log(LogType::Error, ToString(errStr, "Image loading failed."));
+			return nullptr;
+		}
+		return LoadFromMemory(context, *image, hotspot);
+	}
+
+	std::unique_ptr<Cursor> Cursor::LoadFromMemory(const IGLOContext& context, const Image& cursorImage, IntPoint hotspot)
+	{
+		const char* errStr = "Failed to load cursor from image. Reason: ";
+
+		FormatInfo info = GetFormatInfo(cursorImage.GetFormat());
+		uint32_t bitsPerPixel = info.bytesPerPixel * 8;
+		uint32_t numChannels = info.elementCount;
+		if (bitsPerPixel != 32 || numChannels != 4)
+		{
+			Log(LogType::Error, ToString(errStr, "Image must have 4 color channels and be 32 bits per pixel."));
+			return nullptr;
+		}
+
+		if (hotspot.x < 0 ||
+			hotspot.y < 0 ||
+			hotspot.x >= (int32_t)cursorImage.GetWidth() ||
+			hotspot.y >= (int32_t)cursorImage.GetHeight())
+		{
+			Log(LogType::Error, ToString(errStr, "Invalid hotspot."));
+			return nullptr;
+		}
+
+		// Convert RGBA to BGRA if needed
+		std::unique_ptr<Image> imageBGRA;
+		if (cursorImage.GetFormat() == Format::BYTE_BYTE_BYTE_BYTE ||
+			cursorImage.GetFormat() == Format::BYTE_BYTE_BYTE_BYTE_sRGB)
+		{
+			imageBGRA = Image::Create(cursorImage.GetDesc());
+			memcpy(imageBGRA->GetPixels(), cursorImage.GetPixels(), cursorImage.GetSize());
+			imageBGRA->SwapRedBlue();
+		}
+
+		const uint32_t* pixels = imageBGRA
+			? (uint32_t*)imageBGRA->GetPixels()
+			: (uint32_t*)cursorImage.GetPixels();
+
+		std::unique_ptr<Cursor> out = std::unique_ptr<Cursor>(new Cursor(context));
+
+		DetailedResult result = out->Impl_LoadFromMemory_BGRA(cursorImage.GetExtent(), pixels, hotspot);
+		if (!result)
+		{
+			Log(LogType::Error, errStr + result.errorMessage);
+			return nullptr;
+		}
+
+		return out;
+	}
+
+	void IGLOContext::SetFrameBuffering(uint32_t numFramesInFlight, uint32_t numBackBuffers)
+	{
+		if (this->numFramesInFlight == numFramesInFlight &&
+			this->swapChain.numBackBuffers == numBackBuffers) return;
+
+		if (numFramesInFlight > numBackBuffers)
+		{
+			Log(LogType::Error, ToString(
+				"Invalid framebuffer configuration: frames in flight (", numFramesInFlight,
+				") cannot exceed number of backbuffers (", numBackBuffers, ")."));
+			return;
+		}
+		if (numFramesInFlight > this->maxFramesInFlight)
+		{
+			Log(LogType::Error, ToString(
+				"Invalid framebuffer configuration: frames in flight (", numFramesInFlight,
+				") exceeds max allowed (", this->maxFramesInFlight, ") set at context creation."));
+			return;
+		}
+
+		WaitForIdleDevice();
+		DetailedResult result = CreateSwapChain(this->swapChain.extent, this->swapChain.format,
+			numBackBuffers, numFramesInFlight, this->swapChain.presentMode);
+		if (!result)
+		{
+			Log(LogType::Error, ToString(
+				"Failed to recreate swapchain with ", numBackBuffers, " backbuffers and ",
+				numFramesInFlight, " frames in flight. Reason: ", result.errorMessage));
+		}
+		this->frameIndex = 0;
+		this->numFramesInFlight = numFramesInFlight;
+		this->endOfFrame.clear();
+		this->endOfFrame.resize(numFramesInFlight);
+
+		// Recreate the upload heap manager with new number of frames in flight
+		const uint64_t uploadHeapPageSize = this->uploadHeap->GetLinearPageSize();
+		this->uploadHeap = UploadHeap::Create(*this, uploadHeapPageSize, numFramesInFlight).first;
+
+		// The descriptor heap manager can't be recreated here with a new number of frames in flight,
+		// because it contains persistent descriptors which we don't want to destroy.
+		// A few unused per-frame temporary descriptors (and some per-frame temporary VkImageView) is not a big deal though.
+
+	}
+
+	void IGLOContext::SetBackBufferFormat(Format format)
+	{
+		if (swapChain.format == format) return;
+
+		WaitForIdleDevice();
+		DetailedResult result = CreateSwapChain(swapChain.extent, format, swapChain.numBackBuffers,
+			numFramesInFlight, swapChain.presentMode);
+		if (!result)
+		{
+			Log(LogType::Error, ToString("Failed to recreate swapchain with iglo format ", GetFormatName(format),
+				". Reason: ", result.errorMessage));
+		}
+	}
+
+	MSAA IGLOContext::GetMaxMultiSampleCount(Format textureFormat) const
+	{
+		constexpr uint32_t MaxIgloFormats = 256; // An arbitrary safe upper bound
+
+		uint32_t formatIndex = (uint32_t)textureFormat;
+		if (formatIndex >= MaxIgloFormats) Fatal("Failed GetMaxMultiSampleCount(). Reason: Invalid format.");
+
+		if (maxMSAAPerFormat.size() == 0) maxMSAAPerFormat.resize(MaxIgloFormats, 0);
+
+		// If the max MSAA has already been retrieved for this format, then return it.
+		if (maxMSAAPerFormat[formatIndex] != 0) return (MSAA)maxMSAAPerFormat[formatIndex];
+
+		uint32_t maxMSAA = Impl_GetMaxMultiSampleCount(textureFormat);
+		maxMSAAPerFormat[formatIndex] = maxMSAA;
+		return (MSAA)maxMSAA;
+	}
+
+	const RenderTargetDesc& IGLOContext::GetBackBufferRenderTargetDesc(bool get_opposite_sRGB_view) const
+	{
+		if (get_opposite_sRGB_view)
+		{
+			if (swapChain.wrapped_sRGB_opposite.size() == 0)
+			{
+				Log(LogType::Warning, "Failed to get back buffer render target desc with an sRGB opposite format as requested."
+					" Reason: No back buffer views exist with an sRGB opposite format.");
+				return swapChain.renderTargetDesc;
+			}
+			else
+			{
+				return swapChain.renderTargetDesc_sRGB_opposite;
+			}
+		}
+		else
+		{
+			return swapChain.renderTargetDesc;
+		}
+	}
+
+	const Texture& IGLOContext::GetBackBuffer(bool get_opposite_sRGB_view) const
+	{
+		uint32_t backBufferIndex = GetCurrentBackBufferIndex();
+		if (get_opposite_sRGB_view)
+		{
+			if (swapChain.wrapped_sRGB_opposite.size() == 0)
+			{
+				Log(LogType::Warning, "Failed to get back buffer view with an sRGB opposite format as requested."
+					" Reason: No back buffer views exist with an sRGB opposite format.");
+				return *swapChain.wrapped[backBufferIndex];
+			}
+			else
+			{
+				return *swapChain.wrapped_sRGB_opposite[backBufferIndex];
+			}
+		}
+		else
+		{
+			return *swapChain.wrapped[backBufferIndex];
+		}
+	}
+
+	void IGLOContext::ShowFatalError(const std::string& message, bool popupMessage)
+	{
+		Log(LogType::FatalError, message);
+		if (popupMessage) PopupMessage(message, window.title, this);
+	}
+
+	std::unique_ptr<IGLOContext> IGLOContext::CreateContext(WindowSettings windowSettings, RenderSettings renderSettings, bool showPopupIfFailed)
+	{
+		std::unique_ptr<IGLOContext> out = std::unique_ptr<IGLOContext>(new IGLOContext(renderSettings.maxFramesInFlight));
+
+		if (renderSettings.maxFramesInFlight > renderSettings.numBackBuffers)
+		{
+			out->ShowFatalError("Failed to create IGLOContext. Reason: "
+				"You can't have more frames in flight than the number of back buffers!", showPopupIfFailed);
+			return nullptr;
+		}
+
+		DetailedResult windowResult = out->InitWindow(windowSettings);
+		if (!windowResult)
+		{
+			out->ShowFatalError("Failed to initialize window. Reason: " + windowResult.errorMessage, showPopupIfFailed);
+			return nullptr;
+		}
+		out->isWindowInitialized = true;
+
+		DetailedResult graphicsResult = out->InitGraphicsDevice(renderSettings, out->windowedMode.size);
+		if (!graphicsResult)
+		{
+			out->ShowFatalError("Failed to initialize " IGLO_GRAPHICS_API_STRING ". Reason: " + graphicsResult.errorMessage, showPopupIfFailed);
+			return nullptr;
+		}
+		out->isGraphicsDeviceInitialized = true;
+
+		out->PrepareWindowPostGraphics(windowSettings);
+		return out;
+	}
+
+	IGLOContext::~IGLOContext()
+	{
+		if (commandQueue) commandQueue->WaitForIdle();
+#ifdef IGLO_VULKAN
+		if (graphics.device) vkDeviceWaitIdle(graphics.device);
+#endif
+
+#ifdef __linux__
+		// To prevent a segfault on Linux/X11 with NVIDIA drivers,
+		// we need to destroy the swapchain and surface first, then window, then vulkan device and instance.
+		if (graphics.device)
+		{
+			if (graphics.swapChain)
+			{
+				vkDestroySwapchainKHR(graphics.device, graphics.swapChain, nullptr);
+				graphics.swapChain = VK_NULL_HANDLE;
+			}
+		}
+		if (graphics.instance)
+		{
+			if (graphics.surface)
+			{
+				vkDestroySurfaceKHR(graphics.instance, graphics.surface, nullptr);
+				graphics.surface = VK_NULL_HANDLE;
+			}
+		}
+
+		DestroyWindow();
+		DestroyGraphicsDevice();
+#else
+		DestroyGraphicsDevice();
+		DestroyWindow();
+#endif
+	}
+
+	void IGLOContext::DestroyWindow()
+	{
+		isWindowInitialized = false;
+
+		currentCursor = nullptr;
+
+		Impl_DestroyWindow();
+	}
+
+	void IGLOContext::DestroyGraphicsDevice()
+	{
+		isGraphicsDeviceInitialized = false;
+
+		endOfFrame.clear();
+
+		genMipsPipeline = nullptr;
+		bilinearClampSampler = nullptr;
+
+		descriptorHeap = nullptr;
+		uploadHeap = nullptr;
+		commandQueue = nullptr;
+
+		DestroySwapChainResources();
+		Impl_DestroyGraphicsDevice();
+	}
+
+	DetailedResult IGLOContext::InitWindow(const WindowSettings& windowSettings)
+	{
+		mousePosition = IntPoint(0, 0);
+		mouseButtonIsDown.Clear();
+		mouseButtonIsDown.Resize(6, false); // 6 mouse buttons
+		keyIsDown.Clear();
+		keyIsDown.Resize(256, false); // There are max 256 keys
+
+		windowedMode.pos = IntPoint(0, 0);
+		windowedMode.size = Extent2D(windowSettings.width, windowSettings.height);
+		windowedMode.visible = windowSettings.visible;
+		windowedMode.bordersVisible = windowSettings.bordersVisible;
+		windowedMode.resizable = windowSettings.resizable;
+
+		window.title = windowSettings.title;
+
+		return Impl_InitWindow(windowSettings);
+	}
+
+	DetailedResult IGLOContext::InitGraphicsDevice(const RenderSettings& renderSettings, Extent2D backBufferSize)
+	{
+		frameIndex = 0;
+		numFramesInFlight = renderSettings.maxFramesInFlight;
+		endOfFrame.resize(renderSettings.maxFramesInFlight);
+
+		// Graphics device
+		{
+			DetailedResult result = Impl_InitGraphicsDevice();
+			if (!result) return result;
+		}
+
+		// Command queue manager
+		{
+			auto result = CommandQueue::Create(*this,
+				renderSettings.maxFramesInFlight,
+				renderSettings.numBackBuffers);
+			if (!result.second) return result.second;
+			commandQueue = std::move(result.first);
+		}
+
+		// Upload heap manager
+		{
+			auto result = UploadHeap::Create(*this,
+				renderSettings.uploadHeapPageSize,
+				numFramesInFlight);
+			if (!result.second) return result.second;
+			uploadHeap = std::move(result.first);
+		}
+
+		// Descriptor heap manager
+		{
+			auto result = DescriptorHeap::Create(*this,
+				renderSettings.maxPersistentResourceDescriptors,
+				renderSettings.maxTempResourceDescriptorsPerFrame,
+				renderSettings.maxSamplerDescriptors,
+				renderSettings.maxFramesInFlight);
+			if (!result.second) return result.second;
+			descriptorHeap = std::move(result.first);
+		}
+
+		// Swap Chain
+		{
+			DetailedResult result = CreateSwapChain(backBufferSize,
+				renderSettings.backBufferFormat,
+				renderSettings.numBackBuffers,
+				renderSettings.maxFramesInFlight,
+				renderSettings.presentMode);
+			if (!result) return result;
+		}
+
+		// Mipmap gen compute pipeline
+		{
+			genMipsPipeline = Pipeline::CreateCompute(*this, Shader(g_CS_GenerateMipmaps, sizeof(g_CS_GenerateMipmaps), "CSMain"));
+			if (!genMipsPipeline)
+			{
+				Log(LogType::Warning, "Failed to create mipmap generation compute pipeline.");
+			}
+
+			SamplerDesc samplerDesc;
+			samplerDesc.filter = TextureFilter::Bilinear;
+			samplerDesc.wrapU = TextureWrapMode::Clamp;
+			samplerDesc.wrapV = TextureWrapMode::Clamp;
+			samplerDesc.wrapW = TextureWrapMode::Clamp;
+
+			bilinearClampSampler = Sampler::Create(*this, samplerDesc);
+			if (!bilinearClampSampler)
+			{
+				Log(LogType::Warning, "Failed to create mipmap generation sampler.");
+			}
+		}
+
+		return DetailedResult::Success();
+	}
+
+	CommandQueue::~CommandQueue()
+	{
+		Impl_Destroy();
+	}
+
+	std::pair<std::unique_ptr<CommandQueue>, DetailedResult> CommandQueue::Create(const IGLOContext& context,
+		uint32_t maxFramesInFlight, uint32_t numBackBuffers)
+	{
+		std::unique_ptr<CommandQueue> out = std::unique_ptr<CommandQueue>(new CommandQueue(context, maxFramesInFlight, numBackBuffers));
+
+		DetailedResult result = out->Impl_Create();
+		if (!result)
+		{
+			return { nullptr, result };
+		}
+
+		return { std::move(out), DetailedResult::Success() };
+	}
+
+	Receipt CommandQueue::SubmitCommands(const CommandList& commandList)
+	{
+		const CommandList* cmd[] = { &commandList };
+		return SubmitCommands(cmd, 1);
+	}
+
+	Receipt CommandQueue::SubmitCommands(const CommandList* const* commandLists, uint32_t numCommandLists)
+	{
+		const char* errStr = "Failed to submit commands. Reason: ";
+
+		if (!commandLists || numCommandLists == 0)
+		{
+			Log(LogType::Error, ToString(errStr, "No command lists specified."));
+			return Receipt();
+		}
+		if (numCommandLists > MAX_COMMAND_LISTS_PER_SUBMIT)
+		{
+			Log(LogType::Error, ToString(errStr, "Exceeded max number of command lists per submit."));
+			return Receipt();
+		}
+
+		CommandListType cmdType = commandLists[0]->GetCommandListType();
+
+		for (uint32_t i = 0; i < numCommandLists; i++)
+		{
+			if (commandLists[i]->GetCommandListType() != cmdType)
+			{
+				Log(LogType::Error, ToString(errStr, "The provided command lists must share the same command list type."));
+				return Receipt();
+			}
+		}
+
+		return Impl_SubmitCommands(commandLists, numCommandLists, cmdType);
+	}
+
+	bool CommandQueue::IsComplete(Receipt receipt) const
+	{
+		if (receipt.IsNull()) return true;
+
+		return Impl_IsComplete(receipt);
+	}
+
+	void CommandQueue::WaitForCompletion(Receipt receipt)
+	{
+		if (receipt.IsNull()) return;
+		if (IsComplete(receipt)) return;
+
+		Impl_WaitForCompletion(receipt);
+	}
+
+	Image::~Image()
+	{
+		if (ownership == PixelOwnership::OwnedSTBI && pixelsPtr)
+		{
+			stbi_image_free((void*)pixelsPtr);
+		}
+		pixelsPtr = nullptr;
+	}
+
+	DetailedResult ImageDesc::Validate() const
+	{
+		if (extent.width == 0 || extent.height == 0)
+		{
+			return DetailedResult::Fail("Width and height must be nonzero.");
+		}
+		if (format == Format::None)
+		{
+			return DetailedResult::Fail("Bad format.");
+		}
+		if (mipLevels < 1 || numFaces < 1)
+		{
+			return DetailedResult::Fail("mipLevels and numFaces must be 1 or higher.");
+		}
+		if (isCubemap && (numFaces % 6 != 0))
+		{
+			return DetailedResult::Fail("The number of faces in a cubemap image must be a multiple of 6.");
+		}
+		FormatInfo info = GetFormatInfo(format);
+		if (info.blockSize > 0)
+		{
+			bool widthIsMultipleOf4 = (extent.width % 4 == 0);
+			bool heightIsMultipleOf4 = (extent.height % 4 == 0);
+			if (!widthIsMultipleOf4 || !heightIsMultipleOf4)
+			{
+				return DetailedResult::Fail("Width and height must be multiples of 4 when using a block compression format.");
+			}
+		}
+		return DetailedResult::Success();
+	}
+
+	std::unique_ptr<Image> Image::Create(uint32_t width, uint32_t height, Format format)
+	{
+		ImageDesc imageDesc;
+		imageDesc.extent = Extent2D(width, height);
+		imageDesc.format = format;
+		return Create(imageDesc);
+	}
+
+	std::unique_ptr<Image> Image::Create(const ImageDesc& desc)
+	{
+		DetailedResult result = desc.Validate();
+		if (!result)
+		{
+			Log(LogType::Error, "Failed to create image. Reason: " + result.errorMessage);
+			return nullptr;
+		}
+
+		std::unique_ptr<Image> out = std::unique_ptr<Image>(new Image(desc));
+		out->size = CalculateTotalSize(desc.extent, desc.format, desc.mipLevels, desc.numFaces);
+		out->ownership = PixelOwnership::OwnedBuffer;
+		out->ownedBuffer.resize(out->size, 0);
+		out->pixelsPtr = out->ownedBuffer.data();
+		return out;
+	}
+
+	std::unique_ptr<Image> Image::CreateWrapped(const void* pixels, const ImageDesc& desc)
+	{
+		DetailedResult result = desc.Validate();
+		if (!result)
+		{
+			Log(LogType::Error, "Failed to create wrapped image. Reason: " + result.errorMessage);
+			return nullptr;
+		}
+
+		std::unique_ptr<Image> out = std::unique_ptr<Image>(new Image(desc));
+		out->size = CalculateTotalSize(desc.extent, desc.format, desc.mipLevels, desc.numFaces);
+		out->ownership = PixelOwnership::Wrapped;
+		out->pixelsPtr = (byte*)pixels;
+		return out;
+	}
+
+	size_t Image::GetMipSize(uint32_t mipIndex) const
+	{
+		return CalculateMipSize(desc.extent, desc.format, mipIndex);
+	}
+
+	uint32_t Image::GetMipRowPitch(uint32_t mipIndex) const
+	{
+		return CalculateMipRowPitch(desc.extent, desc.format, mipIndex);
+	}
+
+	Extent2D Image::GetMipExtent(uint32_t mipIndex) const
+	{
+		return CalculateMipExtent(desc.extent, mipIndex);
+	}
+
+	size_t Image::CalculateTotalSize(Extent2D extent, Format format, uint32_t mipLevels, uint32_t numFaces)
+	{
+		size_t totalSize = 0;
+		for (uint32_t i = 0; i < mipLevels; i++)
+		{
+			totalSize += CalculateMipSize(extent, format, i);
+		}
+		return totalSize * numFaces;
+	}
+
+	size_t Image::CalculateMipSize(Extent2D extent, Format format, uint32_t mipIndex)
+	{
+		FormatInfo info = GetFormatInfo(format);
+		uint32_t mipWidth = std::max(uint32_t(1), extent.width >> mipIndex);
+		uint32_t mipHeight = std::max(uint32_t(1), extent.height >> mipIndex);
+		if (info.blockSize > 0) // Block-compressed format
+		{
+			return std::max(size_t(1), size_t((mipWidth + 3) / 4)) * std::max(size_t(1), size_t((mipHeight + 3) / 4)) * (size_t)info.blockSize;
+		}
+		else
+		{
+			return std::max(size_t(1), (size_t)mipWidth * (size_t)mipHeight * (size_t)info.bytesPerPixel);
+		}
+	}
+
+	uint32_t Image::CalculateMipRowPitch(Extent2D extent, Format format, uint32_t mipIndex)
+	{
+		FormatInfo info = GetFormatInfo(format);
+		uint32_t mipWidth = std::max(uint32_t(1), extent.width >> mipIndex);
+		if (info.blockSize > 0) // Block-compressed format
+		{
+			return std::max(uint32_t(1), ((mipWidth + 3) / 4)) * info.blockSize;
+		}
+		else
+		{
+			return std::max(uint32_t(1), mipWidth * info.bytesPerPixel);
+		}
+	}
+
+	Extent2D Image::CalculateMipExtent(Extent2D extent, uint32_t mipIndex)
+	{
+		Extent2D mipExtent;
+		mipExtent.width = std::max(uint32_t(1), extent.width >> mipIndex);
+		mipExtent.height = std::max(uint32_t(1), extent.height >> mipIndex);
+		return mipExtent;
+	}
+
+	uint32_t Image::CalculateNumMips(Extent2D extent)
+	{
+		uint32_t numLevels = 1;
+		while (extent.width > 1 || extent.height > 1)
+		{
+			extent.width = std::max(extent.width / 2, (uint32_t)1);
+			extent.height = std::max(extent.height / 2, (uint32_t)1);
+			numLevels++;
+		}
+		return numLevels;
+	}
+
+	void* Image::GetMipPixels(uint32_t faceIndex, uint32_t mipIndex) const
+	{
+		if (faceIndex >= desc.numFaces || mipIndex >= desc.mipLevels)
+		{
+			Fatal("Out of bounds Image::GetMipPixels");
+		}
+		byte* out = pixelsPtr;
+		out += faceIndex * CalculateTotalSize(desc.extent, desc.format, desc.mipLevels, 1);
+		for (uint32_t m = 0; m < mipIndex; m++)
+		{
+			out += GetMipSize(m);
+		}
+		return out;
+	}
+
+	std::unique_ptr<Image> Image::LoadFromFile(const std::string& filename)
+	{
+		const char* errStr = "Failed to load image from file. Reason: ";
+
+		ReadFileResult file = ReadFile(filename);
+		if (!file.success)
+		{
+			Log(LogType::Error, ToString(errStr, "Couldn't open '" + filename + "'."));
+			return nullptr;
+		}
+		if (file.fileContent.size() == 0)
+		{
+			Log(LogType::Error, ToString(errStr, "File '" + filename + "' is empty."));
+			return nullptr;
+		}
+
+		// An optimization that lets us skip a memcpy for most DDS files
+		const bool guaranteeOwnership = false;
+
+		std::unique_ptr<Image> out = LoadFromMemory(file.fileContent.data(), file.fileContent.size(), guaranteeOwnership);
+		if (!out) return nullptr;
+
+		if (out->IsWrapped())
+		{
+			// Transfer ownership of the filedata to the image without using memcpy.
+			out->ownedBuffer.swap(file.fileContent);
+			out->ownership = PixelOwnership::OwnedBuffer;
+		}
+		return out;
+	}
+
+	bool Image::FileIsOfTypeDDS(const byte* fileData, size_t numBytes)
+	{
+		if (numBytes < 8) return false;
+		uint32_t* f32 = (uint32_t*)fileData;
+		uint8_t* f8 = (uint8_t*)fileData;
+		if (f8[0] != 'D') return false;
+		if (f8[1] != 'D') return false;
+		if (f8[2] != 'S') return false;
+		if (f8[3] != ' ') return false;
+		if (f32[1] != 124) return false;
+		return true;
+	}
+
+	// This struct was taken from public domain source SOIL: https://github.com/littlstar/soil/blob/master/include/SOIL/stbi_dds_aug_c.h
+	struct DDS_header
+	{
+		uint32_t    dwMagic;
+		uint32_t    dwSize;
+		uint32_t    dwFlags;
+		uint32_t    dwHeight;
+		uint32_t    dwWidth;
+		uint32_t    dwPitchOrLinearSize;
+		uint32_t    dwDepth;
+		uint32_t    dwMipMapCount;
+		uint32_t    dwReserved1[11];
+		struct // DDPIXELFORMAT
+		{
+			uint32_t    dwSize;
+			uint32_t    dwFlags;
+			uint32_t    dwFourCC;
+			uint32_t    dwRGBBitCount;
+			uint32_t    dwRBitMask;
+			uint32_t    dwGBitMask;
+			uint32_t    dwBBitMask;
+			uint32_t    dwAlphaBitMask;
+		}sPixelFormat;
+		struct // DDCAPS2
+		{
+			uint32_t    dwCaps1;
+			uint32_t    dwCaps2;
+			uint32_t    dwDDSX;
+			uint32_t    dwReserved;
+		} sCaps;
+		uint32_t dwReserved2;
+	};
+
+	//	the following constants were copied directly off the MSDN website
+	//	The dwFlags member of the original DDSURFACEDESC2 structure
+	//	can be set to one or more of the following values.
+#define DDSD_CAPS			0x00000001
+#define DDSD_HEIGHT			0x00000002
+#define DDSD_WIDTH			0x00000004
+#define DDSD_PITCH			0x00000008
+#define DDSD_PIXELFORMAT	0x00001000
+#define DDSD_MIPMAPCOUNT	0x00020000
+#define DDSD_LINEARSIZE		0x00080000
+#define DDSD_DEPTH			0x00800000
+
+//	DirectDraw Pixel Format
+#define DDPF_ALPHAPIXELS	0x00000001
+#define DDPF_FOURCC			0x00000004
+#define DDPF_RGB			0x00000040
+
+//	The dwCaps1 member of the DDSCAPS2 structure can be
+//	set to one or more of the following values.
+#define DDSCAPS_COMPLEX	0x00000008
+#define DDSCAPS_TEXTURE	0x00001000
+#define DDSCAPS_MIPMAP	0x00400000
+
+//	The dwCaps2 member of the DDSCAPS2 structure can be
+//	set to one or more of the following values.
+#define DDSCAPS2_CUBEMAP			0x00000200
+#define DDSCAPS2_CUBEMAP_POSITIVEX	0x00000400
+#define DDSCAPS2_CUBEMAP_NEGATIVEX	0x00000800
+#define DDSCAPS2_CUBEMAP_POSITIVEY	0x00001000
+#define DDSCAPS2_CUBEMAP_NEGATIVEY	0x00002000
+#define DDSCAPS2_CUBEMAP_POSITIVEZ	0x00004000
+#define DDSCAPS2_CUBEMAP_NEGATIVEZ	0x00008000
+#define DDSCAPS2_VOLUME				0x00200000
+
+	// Code from public domain source SOIL: https://github.com/littlstar/soil/blob/master/src/soil.c
+	std::unique_ptr<Image> Image::LoadFromDDS(const byte* fileData, size_t numBytes, bool guaranteeOwnership)
+	{
+		const char* errStr = "Failed to load image from file data. Reason: ";
+
+		if (numBytes < sizeof(DDS_header))
+		{
+			Log(LogType::Error, ToString(errStr, "The DDS file is corrupted (too small for expected header)."));
+			return nullptr;
+		}
+		DDS_header* header = (DDS_header*)fileData;
+		size_t buffer_index = 0;
+		buffer_index = sizeof(DDS_header);
+
+		bool failed = false;
+
+		uint32_t flag = ('D' << 0) | ('D' << 8) | ('S' << 16) | (' ' << 24);
+		if (header->dwMagic != flag) failed = true;
+		if (header->dwSize != 124) failed = true;
+		flag = DDSD_CAPS | DDSD_HEIGHT | DDSD_WIDTH | DDSD_PIXELFORMAT;
+		if ((header->dwFlags & flag) != flag) failed = true;
+		if ((header->sCaps.dwCaps1 & DDSCAPS_TEXTURE) == 0) failed = true;
+		/*	make sure it is a type we can upload	*/
+		if ((header->sPixelFormat.dwFlags & DDPF_FOURCC) &&
+			!(
+				(header->sPixelFormat.dwFourCC == (('D' << 0) | ('X' << 8) | ('T' << 16) | ('1' << 24))) ||
+				(header->sPixelFormat.dwFourCC == (('D' << 0) | ('X' << 8) | ('T' << 16) | ('3' << 24))) ||
+				(header->sPixelFormat.dwFourCC == (('D' << 0) | ('X' << 8) | ('T' << 16) | ('5' << 24)))))
+		{
+			failed = true;
+		}
+		if (failed)
+		{
+			Log(LogType::Error, ToString(errStr, "The DDS file is either corrupted or unsupported."));
+			return nullptr;
+		}
+
+		/*	OK, validated the header, let's load the image data	*/
+		ImageDesc tempDesc =
+		{
+			.extent = Extent2D(header->dwWidth, header->dwHeight),
+			.format = Format::None,
+			.mipLevels = 1,
+			.numFaces = 1,
+			.isCubemap = false,
+		};
+		bool mustConvertBGRToBGRA = false;
+
+		int32_t cubemap = (header->sCaps.dwCaps2 & DDSCAPS2_CUBEMAP) / DDSCAPS2_CUBEMAP;
+		if (cubemap)
+		{
+			tempDesc.isCubemap = true;
+			tempDesc.numFaces = 6; // A cubemap has 6 faces
+		}
+
+		int32_t volume = (header->sCaps.dwCaps2 & DDSCAPS2_VOLUME) / DDSCAPS2_VOLUME;
+		if (volume)
+		{
+			Log(LogType::Error, ToString(errStr, "The DDS file contains an unsupported format (3D volume texture)."));
+			return nullptr;
+		}
+
+		int32_t uncompressed = 1 - (header->sPixelFormat.dwFlags & DDPF_FOURCC) / DDPF_FOURCC;
+		if (uncompressed)
+		{
+			if (header->sPixelFormat.dwRGBBitCount == 32)
+			{
+				// 32 bits per pixel BGRA or BGRX.
+				// BGRX is compatible with BGRA, so just use BGRA for both
+				tempDesc.format = Format::BYTE_BYTE_BYTE_BYTE_BGRA;
+				if (header->sPixelFormat.dwRBitMask == 0x000000ff)
+				{
+					tempDesc.format = Format::BYTE_BYTE_BYTE_BYTE; // Order is RGBA, not BGRA
+				}
+			}
+			else if (header->sPixelFormat.dwRGBBitCount == 24)
+			{
+				// 24 bits per pixel BGR. Must be converted to BGRA.
+				mustConvertBGRToBGRA = true;
+				tempDesc.format = Format::BYTE_BYTE_BYTE_BYTE_BGRA;
+			}
+			else if (header->sPixelFormat.dwRGBBitCount == 16)
+			{
+				Log(LogType::Error, ToString(errStr, "The DDS file contains an unsupported format (16-bits per pixel uncompressed)."));
+				return nullptr;
+			}
+			else if (header->sPixelFormat.dwRGBBitCount == 8)
+			{
+				tempDesc.format = Format::BYTE;
+			}
+			else
+			{
+				Log(LogType::Error, ToString(errStr, "The DDS file contains an unknown format."));
+				return nullptr;
+			}
+		}
+		else
+		{
+			/*	well, we know it is DXT1/3/5, because we checked above	*/
+			switch ((header->sPixelFormat.dwFourCC >> 24) - '0')
+			{
+				// DXT1 uses BC1.
+				// DXT2 and DXT3 both use BC2. DXT2 uses premultiplied alpha, DXT3 uses regular alpha.
+				// DXT4 and DXT5 both use BC3. DXT4 uses premultiplied alpha, DXT5 uses regular alpha.
+
+			case 1: tempDesc.format = Format::BC1; break;
+			case 3: tempDesc.format = Format::BC2; break;
+			case 5: tempDesc.format = Format::BC3; break;
+			}
+		}
+
+		// If mipmaps exist
+		if ((header->sCaps.dwCaps1 & DDSCAPS_MIPMAP) && (header->dwMipMapCount > 1))
+		{
+			tempDesc.mipLevels = header->dwMipMapCount;
+		}
+
+		byte* ddsPixels = (byte*)&fileData[buffer_index];
+		std::unique_ptr<Image> out;
+		if (mustConvertBGRToBGRA || guaranteeOwnership)
+		{
+			// If we must convert to different format, then this image must create its own pixel buffer first
+			out = Create(tempDesc);
+		}
+		else
+		{
+			// Store pointer to existing pixel data
+			out = CreateWrapped(ddsPixels, tempDesc);
+		}
+		if (!out)
+		{
+			Log(LogType::Error, ToString(errStr, "Unable to create image. This error should be impossible."));
+			return nullptr;
+		}
+
+		size_t expected = out->size;
+		if (mustConvertBGRToBGRA)
+		{
+			expected -= (expected / 4); // BGRA -> BGR is 1/4 smaller
+		}
+		size_t remaining = numBytes - buffer_index;
+		if (remaining < expected)
+		{
+			Log(LogType::Error, ToString(errStr, "The DDS file is corrupted (it is smaller than expected)."));
+			return nullptr;
+		}
+		else if (remaining > expected)
+		{
+			Log(LogType::Warning, "DDS file is larger than expected, some contents of the DDS file may not have been loaded properly.");
+		}
+
+		if (mustConvertBGRToBGRA)
+		{
+			size_t i = 0;
+			for (size_t j = 0; j < out->size; j += 4)
+			{
+				out->pixelsPtr[j] = ddsPixels[i];
+				out->pixelsPtr[j + 1] = ddsPixels[i + 1];
+				out->pixelsPtr[j + 2] = ddsPixels[i + 2];
+				out->pixelsPtr[j + 3] = 255; // Add an alpha channel to RGB pixels
+				i += 3;
+			}
+		}
+		else
+		{
+			if (guaranteeOwnership)
+			{
+				// Copy pixel data from DDS file to this image
+				memcpy(out->pixelsPtr, ddsPixels, out->size);
+			}
+		}
+		return out;
+	}
+
+	std::unique_ptr<Image> Image::LoadFromMemory(const byte* fileData, size_t numBytes, bool guaranteeOwnership)
+	{
+		const char* errStr = "Failed to load image from file data. Reason: ";
+
+		if (numBytes == 0 || fileData == nullptr)
+		{
+			Log(LogType::Error, ToString(errStr, "No data provided."));
+			return nullptr;
+		}
+
+		if (FileIsOfTypeDDS(fileData, numBytes)) // .DDS
+		{
+			return LoadFromDDS(fileData, numBytes, guaranteeOwnership);
+		}
+
+		int pixelType = 0;
+		if (stbi_is_hdr_from_memory(fileData, (int)numBytes)) // .HDR
+		{
+			pixelType = 2; // FLOAT (32-bit)
+		}
+		else if (stbi_is_16_bit_from_memory(fileData, (int)numBytes)) // .PNG or .PSD
+		{
+			pixelType = 1; // UINT16 (16-bit)
+		}
+		else
+		{
+			pixelType = 0; // BYTE (8-bit)
+		}
+
+		int w = 0, h = 0, channels = 0;
+		if (!stbi_info_from_memory(fileData, (int)numBytes, &w, &h, &channels)) // .JPEG .PNG .TGA .BMP .PSD .GIF .PIC .PNM
+		{
+			const char* stbErrorStr = stbi_failure_reason();
+			Log(LogType::Error, ToString(errStr, "stb_image returned error: ", stbErrorStr, "."));
+			return nullptr;
+		}
+
+		// Graphics API's don't like triple channel texture formats. Force 4 channels if 3 channels detected.
+		int forceChannels = (channels == 3) ? 4 : 0;
+
+		byte* stbiPixels = nullptr;
+		if (pixelType == 0) // 8 bits per color channel
+		{
+			stbiPixels = stbi_load_from_memory(fileData, (int)numBytes, &w, &h, &channels, forceChannels);
+		}
+		else if (pixelType == 1) // 16 bits per color channel
+		{
+			stbiPixels = (byte*)stbi_load_16_from_memory(fileData, (int)numBytes, &w, &h, &channels, forceChannels);
+		}
+		else if (pixelType == 2) // 32 bits per color channel
+		{
+			stbiPixels = (byte*)stbi_loadf_from_memory(fileData, (int)numBytes, &w, &h, &channels, forceChannels);
+		}
+
+		if (!stbiPixels)
+		{
+			const char* stbErrorStr = stbi_failure_reason();
+			Log(LogType::Error, ToString(errStr, "stb_image returned error: ", stbErrorStr, "."));
+			return nullptr;
+		}
+
+		if (forceChannels != 0) channels = forceChannels;
+		Format tempFormat = Format::None;
+
+		if (channels == 0)
+		{
+			Log(LogType::Error, ToString(errStr, "0 color channels detected."));
+			stbi_image_free(stbiPixels);
+			return nullptr;
+		}
+		else if (channels == 1)
+		{
+			if (pixelType == 0) tempFormat = Format::BYTE;
+			else if (pixelType == 1) tempFormat = Format::UINT16;
+			else if (pixelType == 2) tempFormat = Format::FLOAT;
+		}
+		else if (channels == 2)
+		{
+			if (pixelType == 0) tempFormat = Format::BYTE_BYTE;
+			else if (pixelType == 1) tempFormat = Format::UINT16_UINT16;
+			else if (pixelType == 2) tempFormat = Format::FLOAT_FLOAT;
+		}
+		else if (channels == 3)
+		{
+			Log(LogType::Error, ToString(errStr, "stb_image failed forcing 4 color channels for triple channel texture."
+				" This error should be impossible."));
+			stbi_image_free(stbiPixels);
+			return nullptr;
+		}
+		else if (channels == 4)
+		{
+			if (pixelType == 0) tempFormat = Format::BYTE_BYTE_BYTE_BYTE;
+			else if (pixelType == 1) tempFormat = Format::UINT16_UINT16_UINT16_UINT16;
+			else if (pixelType == 2) tempFormat = Format::FLOAT_FLOAT_FLOAT_FLOAT;
+		}
+		else
+		{
+			Log(LogType::Error, ToString(errStr, "Color channels must not exceed 4. Color channels detected: ", channels, "."));
+			stbi_image_free(stbiPixels);
+			return nullptr;
+		}
+
+		if (tempFormat == Format::None)
+		{
+			Log(LogType::Error, ToString(errStr, "Unable to figure out which iglo format to use. This should be impossible."));
+			stbi_image_free(stbiPixels);
+			return nullptr;
+		}
+
+		// Store a pointer to the pixel data stb_image created
+		ImageDesc pointerImageDesc;
+		pointerImageDesc.extent = Extent2D(w, h);
+		pointerImageDesc.format = tempFormat;
+		std::unique_ptr<Image> out = CreateWrapped(stbiPixels, pointerImageDesc);
+		if (!out)
+		{
+			Log(LogType::Error, ToString(errStr, "Unable to create wrapped image. This should be impossible."));
+			stbi_image_free(stbiPixels);
+			return nullptr;
+		}
+
+		// The image now points to the pixel data stb_image created.
+		// It must be freed with stbi_image_free() later.
+		out->ownership = PixelOwnership::OwnedSTBI;
+
+		return out;
+	}
+
+	bool Image::SaveToFile(const std::string& filename) const
+	{
+		const char* errStr = "Failed to save image to file. Reason: ";
+
+		if (filename.size() == 0)
+		{
+			Log(LogType::Error, ToString(errStr, "No filename provided."));
+			return false;
+		}
+		FormatInfo info = GetFormatInfo(desc.format);
+		if (info.blockSize > 0)
+		{
+			Log(LogType::Error, ToString(errStr, "Image uses block-compression format, which is not supported being saved to file."));
+			return false;
+		}
+
+		std::string fileExt = utf8_to_lower(GetFileExtension(filename));
+		bool success = false;
+		bool validExtension = false;
+		byte* tempPixels = pixelsPtr;
+
+		std::vector<byte> tempPixelBuffer;
+		if (desc.format == Format::BYTE_BYTE_BYTE_BYTE_BGRA ||
+			desc.format == Format::BYTE_BYTE_BYTE_BYTE_BGRA_sRGB) // BGRA must be converted to RGBA
+		{
+			tempPixelBuffer.resize(size);
+			tempPixels = tempPixelBuffer.data();
+			Color32* colorDest = (Color32*)tempPixelBuffer.data();
+			Color32* colorSrc = (Color32*)pixelsPtr;
+			for (size_t i = 0; i < size / 4; i++)
+			{
+				colorDest[i].red = colorSrc[i].blue; // Swap blue and red colors
+				colorDest[i].green = colorSrc[i].green;
+				colorDest[i].blue = colorSrc[i].red; // Swap blue and red colors
+				colorDest[i].alpha = colorSrc[i].alpha;
+			}
+		}
+
+		switch (desc.format)
+		{
+		case Format::BYTE:
+		case Format::BYTE_NotNormalized:
+		case Format::BYTE_BYTE:
+		case Format::BYTE_BYTE_NotNormalized:
+		case Format::BYTE_BYTE_BYTE_BYTE:
+		case Format::BYTE_BYTE_BYTE_BYTE_sRGB:
+		case Format::BYTE_BYTE_BYTE_BYTE_NotNormalized:
+		case Format::BYTE_BYTE_BYTE_BYTE_BGRA:
+		case Format::BYTE_BYTE_BYTE_BYTE_BGRA_sRGB:
+			if (fileExt == ".png")
+			{
+				success = (bool)stbi_write_png(filename.c_str(), GetWidth(), GetHeight(), info.elementCount, (byte*)tempPixels, 0);
+				validExtension = true;
+			}
+			else if (fileExt == ".bmp")
+			{
+				success = (bool)stbi_write_bmp(filename.c_str(), GetWidth(), GetHeight(), info.elementCount, (byte*)tempPixels);
+				validExtension = true;
+			}
+			else if (fileExt == ".tga")
+			{
+				success = (bool)stbi_write_tga(filename.c_str(), GetWidth(), GetHeight(), info.elementCount, (byte*)tempPixels);
+				validExtension = true;
+			}
+			else if (fileExt == ".jpg" || fileExt == ".jpeg")
+			{
+				success = (bool)stbi_write_jpg(filename.c_str(), GetWidth(), GetHeight(), info.elementCount, (byte*)tempPixels, 90);
+				validExtension = true;
+			}
+			break;
+		case Format::FLOAT_FLOAT:
+		case Format::FLOAT_FLOAT_FLOAT:
+		case Format::FLOAT_FLOAT_FLOAT_FLOAT:
+			if (fileExt == ".hdr")
+			{
+				success = (bool)stbi_write_hdr(filename.c_str(), GetWidth(), GetHeight(), info.elementCount, (float*)tempPixels);
+				validExtension = true;
+			}
+			break;
+		default:
+			break;
+		}
+
+		if (success)
+		{
+			return true;
+		}
+		if (!validExtension)
+		{
+			Log(LogType::Error, ToString(errStr, "Unsupported format or file extension."));
+			return false;
+		}
+		else
+		{
+			Log(LogType::Error, ToString(errStr, "stbi failed to write image."));
+			return false;
+		}
+	}
+
+	void Image::SetSRGB(bool sRGB)
+	{
+		// If already using requested format, do nothing
+		if (IsSRGB() == sRGB) return;
+
+		FormatInfo info = GetFormatInfo(desc.format);
+		// If sRGB opposite format is found, use it
+		if (info.sRGB_opposite != Format::None)
+		{
+			desc.format = info.sRGB_opposite;
+		}
+	}
+	bool Image::IsSRGB() const
+	{
+		return GetFormatInfo(desc.format).is_sRGB;
+	}
+
+	bool Image::ReplaceColors(Color32 colorA, Color32 colorB)
+	{
+		bool formatIsSupported = (
+			desc.format == Format::BYTE_BYTE_BYTE_BYTE ||
+			desc.format == Format::BYTE_BYTE_BYTE_BYTE_sRGB ||
+			desc.format == Format::BYTE_BYTE_BYTE_BYTE_BGRA ||
+			desc.format == Format::BYTE_BYTE_BYTE_BYTE_BGRA_sRGB ||
+			desc.format == Format::BYTE_BYTE_BYTE_BYTE_NotNormalized);
+
+		if (!formatIsSupported)
+		{
+			Log(LogType::Error, "Failed to replace colors in image. Reason: Expected a format with 4 channels and 32 bits per pixel.");
+			return false;
+		}
+
+		if (colorA == colorB) return true; // nothing needs to be done
+
+		uint32_t findValue = colorA.rgba;
+		uint32_t replaceValue = colorB.rgba;
+
+		// Convert colorA and colorB from RGBA to BGRA
+		if (desc.format == ig::Format::BYTE_BYTE_BYTE_BYTE_BGRA ||
+			desc.format == Format::BYTE_BYTE_BYTE_BYTE_BGRA_sRGB)
+		{
+			findValue = Color32(colorA.blue, colorA.green, colorA.red, colorA.alpha).rgba;
+			replaceValue = Color32(colorB.blue, colorB.green, colorB.red, colorB.alpha).rgba;
+		}
+		uint32_t* p32 = (uint32_t*)this->pixelsPtr;
+		size_t pixelCount = this->size / 4;
+		for (size_t i = 0; i < pixelCount; i++)
+		{
+			if (p32[i] == findValue) p32[i] = replaceValue;
+		}
+
+		return true;
+	}
+
+	bool Image::SwapRedBlue()
+	{
+		bool formatIsSupported = (
+			desc.format == Format::BYTE_BYTE_BYTE_BYTE ||
+			desc.format == Format::BYTE_BYTE_BYTE_BYTE_sRGB ||
+			desc.format == Format::BYTE_BYTE_BYTE_BYTE_BGRA ||
+			desc.format == Format::BYTE_BYTE_BYTE_BYTE_BGRA_sRGB);
+
+		if (!formatIsSupported)
+		{
+			Log(LogType::Error, "SwapRedBlue failed. Reason: Image format does not support RGBA/BGRA swapping.");
+			return false;
+		}
+
+		uint32_t* p32 = (uint32_t*)this->pixelsPtr;
+		size_t pixelCount = this->size / 4;
+		for (size_t i = 0; i < pixelCount; i++)
+		{
+			byte* p = (byte*)&p32[i];
+			std::swap(p[0], p[2]); // R <-> B
+		}
+
+		// Update format enum to reflect the swap
+		switch (desc.format)
+		{
+		case Format::BYTE_BYTE_BYTE_BYTE: desc.format = Format::BYTE_BYTE_BYTE_BYTE_BGRA; break;
+		case Format::BYTE_BYTE_BYTE_BYTE_BGRA: desc.format = Format::BYTE_BYTE_BYTE_BYTE; break;
+		case Format::BYTE_BYTE_BYTE_BYTE_sRGB: desc.format = Format::BYTE_BYTE_BYTE_BYTE_BGRA_sRGB; break;
+		case Format::BYTE_BYTE_BYTE_BYTE_BGRA_sRGB: desc.format = Format::BYTE_BYTE_BYTE_BYTE_sRGB; break;
+
+		default:
+			break;
+		}
+
+		return true;
+	}
+
+	void IGLOContext::Present()
+	{
+#ifdef IGLO_D3D12
+		HRESULT hr = 0;
+		switch (swapChain.presentMode)
+		{
+		case PresentMode::ImmediateWithTearing:
+			hr = graphics.swapChain->Present(0, DXGI_PRESENT_ALLOW_TEARING);
+			break;
+		case PresentMode::Immediate:
+			hr = graphics.swapChain->Present(0, 0);
+			break;
+		case PresentMode::Vsync:
+			hr = graphics.swapChain->Present(1, 0);
+			break;
+		case PresentMode::VsyncHalf:
+			hr = graphics.swapChain->Present(2, 0);
+			break;
+		default:
+			Log(LogType::Error, "Presentation failed. Reason: Invalid present mode.");
+			break;
+		}
+		if (FAILED(hr))
+		{
+			Log(LogType::Error, ToString("Presentation failed. Reason: IDXGISwapChain::Present returned error code: ", (uint32_t)hr, "."));
+
+			hr = graphics.device->GetDeviceRemovedReason();
+			if (FAILED(hr))
+			{
+				std::string reasonStr;
+				switch (hr)
+				{
+				case DXGI_ERROR_DEVICE_HUNG: reasonStr = "The device has hung."; break;
+				case DXGI_ERROR_DEVICE_REMOVED: reasonStr = "The device was removed."; break;
+				case DXGI_ERROR_DEVICE_RESET: reasonStr = "The device was reset."; break;
+				default:
+					reasonStr = "Unknown device removal reason.";
+					break;
+				}
+				Log(LogType::Error, "Device removal detected! Reason: " + reasonStr);
+				if (callbackOnDeviceRemoved) callbackOnDeviceRemoved(reasonStr);
+			}
+		}
+
+		// Wait until the swap chain is ready to present the next frame.
+		// This ensures that the value passed to SetMaximumFrameLatency() is respected.
+		// Waiting for this at the start of the next frame reduces input latency.
+		// Info:
+		// https://learn.microsoft.com/en-us/windows/uwp/gaming/reduce-latency-with-dxgi-1-3-swap-chains
+		// https://www.intel.com/content/www/us/en/developer/articles/code-sample/sample-application-for-direct3d-12-flip-model-swap-chains.html
+		HANDLE swapchainWaitableObject = graphics.swapChain->GetFrameLatencyWaitableObject();
+		WaitForSingleObjectEx(swapchainWaitableObject, 1000, true);
+#endif
+#ifdef IGLO_VULKAN
+		if (graphics.validSwapChain)
+		{
+			VkResult result = commandQueue->Present(graphics.swapChain);
+			HandleVulkanSwapChainResult(result, "presentation");
+		}
+#endif
+
+		endOfFrame.at(frameIndex).graphicsReceipt = commandQueue->SubmitSignal(CommandListType::Graphics);
+
+		MoveToNextFrame();
+	}
+
+	Receipt IGLOContext::Submit(const CommandList& commandList)
+	{
+		const CommandList* cmd[] = { &commandList };
+		return Submit(cmd, 1);
+	}
+
+	Receipt IGLOContext::Submit(const CommandList* const* commandLists, uint32_t numCommandLists)
+	{
+		Receipt out = commandQueue->SubmitCommands(commandLists, numCommandLists);
+		if (!out.IsNull())
+		{
+			switch (commandLists[0]->GetCommandListType())
+			{
+			case CommandListType::Graphics:
+				endOfFrame[frameIndex].graphicsReceipt = out;
+				break;
+			case CommandListType::Compute:
+				endOfFrame[frameIndex].computeReceipt = out;
+				break;
+			case CommandListType::Copy:
+				endOfFrame[frameIndex].copyReceipt = out;
+				break;
+			default:
+				Fatal("Invalid CommandListType in IGLOContext::Submit()");
+			}
+		}
+		return out;
+	}
+
+	bool IGLOContext::IsComplete(Receipt receipt) const
+	{
+		return commandQueue->IsComplete(receipt);
+	}
+
+	void IGLOContext::WaitForCompletion(Receipt receipt)
+	{
+		commandQueue->WaitForCompletion(receipt);
+
+		if (commandQueue->IsIdle())
+		{
+			// We can safely free all temp resources when GPU is idle.
+			FreeAllTempResources();
+		}
+	}
+
+	void IGLOContext::WaitForIdleDevice()
+	{
+		commandQueue->WaitForIdle();
+
+		// We can safely free all temp resources when GPU is idle.
+		FreeAllTempResources();
+	}
+
+	void IGLOContext::FreeAllTempResources()
+	{
+		descriptorHeap->FreeAllTempResources();
+		uploadHeap->FreeAllTempPages();
+		for (size_t i = 0; i < endOfFrame.size(); i++)
+		{
+			endOfFrame[i].delayedDestroyTextures.clear();
+			endOfFrame[i].delayedDestroyBuffers.clear();
+		}
+	}
+
+	void IGLOContext::MoveToNextFrame()
+	{
+		frameIndex = (frameIndex + 1) % numFramesInFlight;
+
+		assert(numFramesInFlight <= maxFramesInFlight);
+		assert(numFramesInFlight <= swapChain.numBackBuffers);
+		assert(frameIndex < endOfFrame.size());
+
+		EndOfFrame& currentFrame = endOfFrame[frameIndex];
+		commandQueue->WaitForCompletion(currentFrame.graphicsReceipt);
+		commandQueue->WaitForCompletion(currentFrame.computeReceipt);
+		commandQueue->WaitForCompletion(currentFrame.copyReceipt);
+
+		// The delayed destroy resources are held for max 1 full frame cycle
+		currentFrame.delayedDestroyTextures.clear();
+		currentFrame.delayedDestroyBuffers.clear();
+
+		descriptorHeap->NextFrame();
+		uploadHeap->NextFrame();
+
+#ifdef IGLO_VULKAN
+		if (graphics.validSwapChain)
+		{
+			VkResult result = commandQueue->AcquireNextVulkanSwapChainImage(graphics.device, graphics.swapChain,
+				graphics.swapChainUsesMinImageCount ? 0 : UINT64_MAX);
+			HandleVulkanSwapChainResult(result, "image acquisition");
+		}
+		if (!graphics.validSwapChain)
+		{
+			WaitForIdleDevice();
+			DetailedResult dr = CreateSwapChain(swapChain.extent, swapChain.format, swapChain.numBackBuffers,
+				numFramesInFlight, swapChain.presentMode);
+			if (!dr)
+			{
+				Log(LogType::Error, "Failed to replace swapchain. Reason: " + dr.errorMessage);
+			}
+			WaitForIdleDevice();
+		}
+#endif
+	}
+
+	void IGLOContext::DelayedDestroyTexture(std::unique_ptr<Texture> texture) const
+	{
+		if (!texture) return;
+		endOfFrame[frameIndex].delayedDestroyTextures.push_back(std::move(texture));
+	}
+	void IGLOContext::DelayedDestroyBuffer(std::unique_ptr<Buffer> buffer) const
+	{
+		if (!buffer) return;
+		endOfFrame[frameIndex].delayedDestroyBuffers.push_back(std::move(buffer));
+	}
+
+	Descriptor IGLOContext::CreateTempConstant(const void* data, uint64_t numBytes) const
+	{
+		if (numBytes == 0) Fatal("Failed to create temp shader constant. Reason: Size can't be zero.");
+
+		Descriptor outDescriptor = descriptorHeap->AllocateTemp(DescriptorType::ConstantBuffer_CBV);
+		TempBuffer tempBuffer = uploadHeap->AllocateTempBuffer(numBytes, GetGraphicsSpecs().bufferPlacementAlignments.constant);
+
+		memcpy(tempBuffer.data, data, numBytes);
+
+#ifdef IGLO_D3D12
+		D3D12_CONSTANT_BUFFER_VIEW_DESC desc = {};
+		desc.BufferLocation = tempBuffer.impl.resource->GetGPUVirtualAddress() + tempBuffer.offset;
+		desc.SizeInBytes = (UINT)AlignUp(numBytes, GetGraphicsSpecs().bufferPlacementAlignments.constant);
+		graphics.device->CreateConstantBufferView(&desc, descriptorHeap->GetD3D12CPUHandle(outDescriptor));
+#endif
+#ifdef IGLO_VULKAN
+		descriptorHeap->WriteBufferDescriptor(outDescriptor, tempBuffer.impl.buffer, tempBuffer.offset, numBytes);
+#endif
+
+		return outDescriptor;
+	}
+
+	Descriptor IGLOContext::CreateTempStructuredBuffer(const void* data, uint32_t elementStride, uint32_t numElements) const
+	{
+		uint64_t numBytes = (uint64_t)elementStride * numElements;
+
+		if (numBytes == 0) Fatal("Failed to create temp structured buffer. Reason: Size can't be zero.");
+
+		Descriptor outDescriptor = descriptorHeap->AllocateTemp(DescriptorType::RawOrStructuredBuffer_SRV_UAV);
+
+#ifdef IGLO_D3D12
+		// In D3D12, structured buffers need a special non-power of 2 element stride alignment,
+		// which is why we allocate 1 extra element here.
+		TempBuffer tempBuffer = uploadHeap->AllocateTempBuffer(numBytes + elementStride,
+			GetGraphicsSpecs().bufferPlacementAlignments.rawOrStructuredBuffer);
+
+		// We pretend the entire page is an array of elements.
+		// We must figure out the index of our first element, aligned upwards to 'elementStride'.
+		byte* beginningOfPage = (byte*)tempBuffer.data - tempBuffer.offset;
+		uint64_t firstElementIndex = (tempBuffer.offset / elementStride) + 1; // +1 to align upwards
+		uint64_t firstElementOffset = firstElementIndex * elementStride; // Byte offset of our first element
+		memcpy(beginningOfPage + firstElementOffset, data, numBytes);
+
+		D3D12_SHADER_RESOURCE_VIEW_DESC srv = {};
+		srv.Format = DXGI_FORMAT_UNKNOWN;
+		srv.ViewDimension = D3D12_SRV_DIMENSION_BUFFER;
+		srv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+		srv.Buffer.FirstElement = firstElementIndex;
+		srv.Buffer.NumElements = numElements;
+		srv.Buffer.StructureByteStride = elementStride;
+		srv.Buffer.Flags = D3D12_BUFFER_SRV_FLAG_NONE;
+
+		graphics.device->CreateShaderResourceView(tempBuffer.impl.resource, &srv, descriptorHeap->GetD3D12CPUHandle(outDescriptor));
+#endif
+#ifdef IGLO_VULKAN
+		TempBuffer tempBuffer = uploadHeap->AllocateTempBuffer(numBytes, GetGraphicsSpecs().bufferPlacementAlignments.rawOrStructuredBuffer);
+
+		memcpy(tempBuffer.data, data, numBytes);
+
+		descriptorHeap->WriteBufferDescriptor(outDescriptor, tempBuffer.impl.buffer, tempBuffer.offset, numBytes);
+#endif
+
+		return outDescriptor;
+	}
+
+	Descriptor IGLOContext::CreateTempRawBuffer(const void* data, uint64_t numBytes) const
+	{
+		const char* errStr = "Failed to create temp raw buffer. Reason: ";
+
+		if (numBytes == 0) Fatal(ToString(errStr, "Size can't be zero."));
+		if (numBytes % 4 != 0) Fatal(ToString(errStr, "Expected size to be a multiple of 4."));
+
+		Descriptor outDescriptor = descriptorHeap->AllocateTemp(DescriptorType::RawOrStructuredBuffer_SRV_UAV);
+		TempBuffer tempBuffer = uploadHeap->AllocateTempBuffer(numBytes, GetGraphicsSpecs().bufferPlacementAlignments.rawOrStructuredBuffer);
+
+		memcpy(tempBuffer.data, data, numBytes);
+
+#ifdef IGLO_D3D12
+		D3D12_SHADER_RESOURCE_VIEW_DESC srv = {};
+		srv.Format = DXGI_FORMAT_R32_TYPELESS;
+		srv.ViewDimension = D3D12_SRV_DIMENSION_BUFFER;
+		srv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+		srv.Buffer.FirstElement = tempBuffer.offset / 4;
+		srv.Buffer.NumElements = UINT(numBytes / 4);
+		srv.Buffer.StructureByteStride = 0;
+		srv.Buffer.Flags = D3D12_BUFFER_SRV_FLAG_RAW;
+
+		graphics.device->CreateShaderResourceView(tempBuffer.impl.resource, &srv, descriptorHeap->GetD3D12CPUHandle(outDescriptor));
+#endif
+#ifdef IGLO_VULKAN
+		descriptorHeap->WriteBufferDescriptor(outDescriptor, tempBuffer.impl.buffer, tempBuffer.offset, numBytes);
+#endif
+
+		return outDescriptor;
+	}
+
+	Buffer::~Buffer()
+	{
+		Impl_Destroy();
+
+		for (Descriptor d : descriptor_SRV_or_CBV)
+		{
+			if (d) context.GetDescriptorHeap().FreePersistent(d);
+		}
+		descriptor_SRV_or_CBV.clear();
+
+		if (descriptor_UAV)
+		{
+			context.GetDescriptorHeap().FreePersistent(descriptor_UAV);
+			descriptor_UAV.SetToNull();
+		}
+	}
+
+	Descriptor Buffer::GetDescriptor() const
+	{
+		const char* errStr = "Buffer does not have a descriptor of type SRV/CBV.";
+
+		if (desc.usage == BufferUsage::Readable) Fatal(errStr);
+
+		switch (desc.type)
+		{
+		case BufferType::StructuredBuffer:
+		case BufferType::RawBuffer:
+		case BufferType::ShaderConstant:
+			if (desc.usage == BufferUsage::Dynamic) return descriptor_SRV_or_CBV[dynamicSetCounter];
+			return descriptor_SRV_or_CBV[0];
+
+		default:
+			Fatal(errStr);
+		}
+	}
+
+	Descriptor Buffer::GetUnorderedAccessDescriptor() const
+	{
+		if (!descriptor_UAV) Fatal("Buffer does not have an unordered access descriptor.");
+		return descriptor_UAV;
+	}
+
+	std::unique_ptr<Buffer> Buffer::InternalCreate(const IGLOContext& context, const BufferDesc& desc)
+	{
+		const char* errStr = nullptr;
+
+		switch (desc.type)
+		{
+		case BufferType::VertexBuffer:	   errStr = "Failed to create vertex buffer. Reason: "; break;
+		case BufferType::IndexBuffer:	   errStr = "Failed to create index buffer. Reason: "; break;
+		case BufferType::StructuredBuffer: errStr = "Failed to create structured buffer. Reason: "; break;
+		case BufferType::RawBuffer:        errStr = "Failed to create raw buffer. Reason: "; break;
+		case BufferType::ShaderConstant:   errStr = "Failed to create shader constant buffer. Reason: "; break;
+		default:
+			Fatal("Invalid buffer type when creating buffer.");
+		}
+
+		if (desc.size == 0)
+		{
+			Log(LogType::Error, ToString(errStr, "Size of buffer can't be zero."));
+			return nullptr;
+		}
+		if (desc.usage == BufferUsage::UnorderedAccess)
+		{
+			if (desc.type != BufferType::RawBuffer &&
+				desc.type != BufferType::StructuredBuffer)
+			{
+				Log(LogType::Error, ToString(errStr, "Unordered access buffer usage is only supported for raw and structured buffers."));
+				return nullptr;
+			}
+		}
+		if (desc.type == BufferType::VertexBuffer ||
+			desc.type == BufferType::RawBuffer)
+		{
+			if (desc.size % 4 != 0)
+			{
+				Log(LogType::Error, ToString(errStr, "The size of this type of buffer must be a multiple of 4."));
+				return nullptr;
+			}
+			if (desc.stride != 0)
+			{
+				if (desc.stride % 4 != 0)
+				{
+					Log(LogType::Error, ToString(errStr, "The stride of this type of buffer must be a multiple of 4."));
+					return nullptr;
+				}
+			}
+		}
+
+		std::unique_ptr<Buffer> out = std::unique_ptr<Buffer>(new Buffer(context, desc));
+
+		DetailedResult result = out->Impl_Create();
+		if (!result)
+		{
+			Log(LogType::Error, ToString(errStr, result.errorMessage));
+			return nullptr;
+		}
+
+		return out;
+	}
+
+	std::unique_ptr<Buffer> Buffer::CreateVertexBuffer(const IGLOContext& context, uint32_t vertexStride, uint32_t numVertices, BufferUsage usage)
+	{
+		BufferDesc desc =
+		{
+			.type = BufferType::VertexBuffer,
+			.usage = usage,
+			.size = uint64_t(vertexStride) * uint64_t(numVertices),
+			.stride = vertexStride,
+			.numElements = numVertices,
+		};
+		return InternalCreate(context, desc);
+	}
+
+	std::unique_ptr<Buffer> Buffer::CreateIndexBuffer(const IGLOContext& context, IndexFormat format, uint32_t numIndices, BufferUsage usage)
+	{
+		uint32_t indexStride = 0;
+		if (format == IndexFormat::UINT16)
+		{
+			indexStride = 2;
+		}
+		else if (format == IndexFormat::UINT32)
+		{
+			indexStride = 4;
+		}
+		else
+		{
+			Log(LogType::Error, "Failed to create index buffer. Reason: Invalid format.");
+			return nullptr;
+		}
+
+		BufferDesc desc =
+		{
+			.type = BufferType::IndexBuffer,
+			.usage = usage,
+			.size = uint64_t(indexStride) * uint64_t(numIndices),
+			.stride = indexStride,
+			.numElements = numIndices,
+		};
+
+		return InternalCreate(context, desc);
+	}
+
+	std::unique_ptr<Buffer> Buffer::CreateStructuredBuffer(const IGLOContext& context,
+		uint32_t elementStride, uint32_t numElements, BufferUsage usage)
+	{
+		BufferDesc desc =
+		{
+			.type = BufferType::StructuredBuffer,
+			.usage = usage,
+			.size = uint64_t(elementStride) * uint64_t(numElements),
+			.stride = elementStride,
+			.numElements = numElements,
+		};
+		return InternalCreate(context, desc);
+	}
+
+	std::unique_ptr<Buffer> Buffer::CreateRawBuffer(const IGLOContext& context, uint64_t numBytes, BufferUsage usage)
+	{
+		BufferDesc desc =
+		{
+			.type = BufferType::RawBuffer,
+			.usage = usage,
+			.size = numBytes,
+			.stride = 0,
+			.numElements = 0,
+		};
+		return InternalCreate(context, desc);
+	}
+
+	std::unique_ptr<Buffer> Buffer::CreateShaderConstant(const IGLOContext& context, uint64_t numBytes, BufferUsage usage)
+	{
+		BufferDesc desc =
+		{
+			.type = BufferType::ShaderConstant,
+			.usage = usage,
+			.size = numBytes,
+			.stride = 0,
+			.numElements = 0,
+		};
+		return InternalCreate(context, desc);
+	}
+
+	void Buffer::SetData(CommandList& cmd, const void* srcData)
+	{
+		assert((desc.usage == BufferUsage::Default || desc.usage == BufferUsage::UnorderedAccess) &&
+			"usage must be Default or UnorderedAccess");
+
+		TempBuffer tempBuffer = context.GetUploadHeap().AllocateTempBuffer(desc.size, 1);
+
+		memcpy(tempBuffer.data, srcData, desc.size);
+
+		cmd.CopyTempBufferToBuffer(tempBuffer, *this);
+	}
+
+	void Buffer::SetDynamicData(const void* srcData)
+	{
+		assert(desc.usage == BufferUsage::Dynamic && "must have Dynamic usage");
+
+		dynamicSetCounter = (dynamicSetCounter + 1) % context.GetMaxFramesInFlight();
+
+		assert(dynamicSetCounter < mapped.size());
+		assert(mapped[dynamicSetCounter] != nullptr);
+
+		memcpy(mapped[dynamicSetCounter], srcData, desc.size);
+	}
+
+	void Buffer::ReadData(void* destData)
+	{
+		assert(desc.usage == BufferUsage::Readable && "must have Readable usage");
+
+		uint32_t frameIndex = context.GetFrameIndex();
+
+		assert(frameIndex < mapped.size());
+		assert(mapped[frameIndex] != nullptr);
+
+		memcpy(destData, mapped[frameIndex], desc.size);
+	}
+
+	Texture::~Texture()
+	{
+		if (isWrapped) return;
+
+		Impl_Destroy();
+
+		if (srvDescriptor)
+		{
+			context.GetDescriptorHeap().FreePersistent(srvDescriptor);
+			srvDescriptor.SetToNull();
+		}
+		if (uavDescriptor)
+		{
+			context.GetDescriptorHeap().FreePersistent(uavDescriptor);
+			uavDescriptor.SetToNull();
+		}
+	}
+
+	Descriptor Texture::GetDescriptor() const
+	{
+		if (!srvDescriptor) Fatal("Texture has no SRV.");
+		return srvDescriptor;
+	}
+
+	Descriptor Texture::GetUnorderedAccessDescriptor() const
+	{
+		if (!uavDescriptor) Fatal("Texture has no UAV.");
+		return uavDescriptor;
+	}
+
+	std::unique_ptr<Texture> Texture::Create(const IGLOContext& context, uint32_t width, uint32_t height, Format format,
+		TextureUsage usage, MSAA msaa, ClearValue optimizedClearValue)
+	{
+		TextureDesc desc;
+		desc.extent = Extent2D(width, height);
+		desc.format = format;
+		desc.usage = usage;
+		desc.msaa = msaa;
+		desc.optimizedClearValue = optimizedClearValue;
+		return Texture::Create(context, desc);
+	}
+
+	std::unique_ptr<Texture> Texture::Create(const IGLOContext& context, const TextureDesc& desc)
+	{
+		const char* errStr = "Failed to create texture. Reason: ";
+
+		switch (desc.usage)
+		{
+		case TextureUsage::Default:
+		case TextureUsage::Readable:
+		case TextureUsage::UnorderedAccess:
+		case TextureUsage::RenderTexture:
+		case TextureUsage::DepthBuffer:
+			break;
+
+		default:
+			Fatal(ToString(errStr, "Invalid texture usage."));
+		}
+
+		if (desc.extent.width == 0 || desc.extent.height == 0)
+		{
+			Log(LogType::Error, ToString(errStr, "Texture dimensions must be atleast 1x1."));
+			return nullptr;
+		}
+		if (desc.numFaces == 0 || desc.mipLevels == 0)
+		{
+			Log(LogType::Error, ToString(errStr, "Texture must have atleast 1 face and 1 mip level."));
+			return nullptr;
+		}
+		if (desc.format == Format::None)
+		{
+			Log(LogType::Error, ToString(errStr, "Invalid texture format."));
+			return nullptr;
+		}
+		if (desc.isCubemap && desc.numFaces % 6 != 0)
+		{
+			Log(LogType::Error, ToString(errStr, "For cubemap textures, number of faces must be a multiple of 6."));
+			return nullptr;
+		}
+
+		std::unique_ptr<Texture> out = std::unique_ptr<Texture>(new Texture(context, desc, false));
+
+		DetailedResult result = out->Impl_Create();
+		if (!result)
+		{
+			Log(LogType::Error, ToString(errStr, result.errorMessage));
+			return nullptr;
+		}
+
+		return out;
+	}
+
+	std::unique_ptr<Texture> Texture::CreateWrapped(const IGLOContext& context, const WrappedTextureDesc& desc)
+	{
+		const char* errStr = "Failed to create wrapped texture. Reason: ";
+
+		size_t expectedResources = 1;
+		size_t expectedMemories = 1;
+		size_t expectedMappedPtrs = 0;
+		if (desc.textureDesc.usage == TextureUsage::Readable)
+		{
+			expectedResources = context.GetMaxFramesInFlight();
+			expectedMemories = context.GetMaxFramesInFlight();
+			expectedMappedPtrs = context.GetMaxFramesInFlight();
+		}
+
+#ifdef IGLO_D3D12
+		size_t providedResources = desc.impl.resource.size();
+		size_t providedMemories = desc.impl.resource.size();
+#endif
+#ifdef IGLO_VULKAN
+		size_t providedResources = desc.impl.image.size();
+		size_t providedMemories = desc.impl.memory.size();
+#endif
+		size_t providedMappedPtrs = desc.readMapped.size();
+
+		if (expectedResources != providedResources ||
+			expectedMemories != providedMemories ||
+			expectedMappedPtrs != providedMappedPtrs)
+		{
+			Log(LogType::Error, ToString(errStr, "Unexpected vector size for impl.resource, impl.image, impl.memory or readMapped."));
+			return nullptr;
+		}
+
+		std::unique_ptr<Texture> out = std::unique_ptr<Texture>(new Texture(context, desc.textureDesc, true));
+		out->srvDescriptor = desc.srvDescriptor;
+		out->uavDescriptor = desc.uavDescriptor;
+		out->readMapped = desc.readMapped;
+		out->impl = desc.impl;
+		return out;
+	}
+
+	std::unique_ptr<Texture> Texture::LoadFromFile(const IGLOContext& context, CommandList& cmd,
+		const std::string& filename, bool generateMipmaps, bool sRGB)
+	{
+		ReadFileResult file = ReadFile(filename);
+		if (!file.success)
+		{
+			Log(LogType::Error, "Failed to load texture from file. Reason: Couldn't open '" + filename + "'.");
+			return nullptr;
+		}
+		if (file.fileContent.size() == 0)
+		{
+			Log(LogType::Error, "Failed to load texture from file. Reason: File '" + filename + "' is empty.");
+			return nullptr;
+		}
+		return LoadFromMemory(context, cmd, file.fileContent.data(), file.fileContent.size(), generateMipmaps, sRGB);
+	}
+
+	std::unique_ptr<Texture> Texture::LoadFromMemory(const IGLOContext& context, CommandList& cmd,
+		const byte* fileData, size_t numBytes, bool generateMipmaps, bool sRGB)
+	{
+		std::unique_ptr<Image> image = Image::LoadFromMemory(fileData, numBytes, false);
+		if (!image) return nullptr;
+		if (sRGB) // User requested sRGB format
+		{
+			image->SetSRGB(true);
+			if (!image->IsSRGB())
+			{
+				Log(LogType::Warning, ToString("Unable to use an sRGB format for texture as requested,"
+					" because no sRGB equivalent was found for this iglo format: ", GetFormatName(image->GetFormat())));
+			}
+		}
+		return LoadFromMemory(context, cmd, *image, generateMipmaps);
+	}
+
+	std::unique_ptr<Texture> Texture::LoadFromMemory(const IGLOContext& context, CommandList& cmd,
+		const Image& image, bool generateMipmaps)
+	{
+		const char* errStr = "Failed to create texture from image. Reason: ";
+
+		// Should we generate mips?
+		uint32_t fullMipLevels = Image::CalculateNumMips(image.GetExtent());
+		bool proceedWithMipGen = generateMipmaps && (fullMipLevels > 1) && (image.GetMipLevels() == 1);
+
+		// Can we generate mips?
+		if (proceedWithMipGen)
+		{
+			DetailedResult result = ValidateMipGeneration(cmd.GetCommandListType(), image);
+			if (!result)
+			{
+				Log(LogType::Warning, "Unable to generate mipmaps for texture. Reason: " + result.errorMessage);
+				proceedWithMipGen = false;
+			}
+		}
+
+		TextureDesc selfDesc;
+		selfDesc.extent = Extent2D(image.GetWidth(), image.GetHeight());
+		selfDesc.format = image.GetFormat();
+		selfDesc.usage = TextureUsage::Default;
+		selfDesc.msaa = MSAA::Disabled;
+		selfDesc.isCubemap = image.IsCubemap();
+		selfDesc.numFaces = image.GetNumFaces();
+		selfDesc.mipLevels = proceedWithMipGen ? fullMipLevels : image.GetMipLevels();
+
+		std::unique_ptr<Texture> out = Create(context, selfDesc);
+		if (!out)
+		{
+			// Create() will have already logged an error message if it failed.
+			return nullptr;
+		}
+
+		if (proceedWithMipGen)
+		{
+			DetailedResult result = out->GenerateMips(cmd, image);
+			if (!result)
+			{
+				Log(LogType::Error, ToString(errStr, result.errorMessage));
+				return nullptr;
+			}
+		}
+		else
+		{
+			cmd.AddTextureBarrier(*out, SimpleBarrier::Discard, SimpleBarrier::CopyDest);
+			cmd.FlushBarriers();
+
+			out->SetPixels(cmd, image);
+
+			if (cmd.GetCommandListType() != CommandListType::Copy)
+			{
+				cmd.AddTextureBarrier(*out, SimpleBarrier::CopyDest, SimpleBarrier::PixelShaderResource);
+				cmd.FlushBarriers();
+			}
+		}
+
+		return out;
+	}
+
+	DetailedResult Texture::ValidateMipGeneration(CommandListType cmdListType, const Image& image)
+	{
+		if (GetFormatInfo(image.GetFormat()).blockSize != 0)
+		{
+			return DetailedResult::Fail("Mipmap generation is not supported for block compression formats.");
+		}
+		else if (image.GetNumFaces() > 1)
+		{
+			return DetailedResult::Fail("Mipmap generation is not yet supported for cube maps and texture arrays.");
+		}
+		else if (!IsPowerOf2(image.GetWidth()) || !IsPowerOf2(image.GetHeight()))
+		{
+			return DetailedResult::Fail("Mipmap generation is not yet supported for non power of 2 textures.");
+		}
+		else if (cmdListType == CommandListType::Copy)
+		{
+			return DetailedResult::Fail("Mipmap generation can't be performed with a 'Copy' command list type.");
+		}
+
+		return DetailedResult::Success();
+	}
+
+	DetailedResult Texture::GenerateMips(CommandList& cmd, const Image& image)
+	{
+		assert(desc.mipLevels > 1);
+		assert(image.GetExtent() == desc.extent);
+
+		Extent2D nextMipExtent = Image::CalculateMipExtent(desc.extent, 1);
+		FormatInfo formatInfo = GetFormatInfo(desc.format);
+		Format format_non_sRGB = formatInfo.is_sRGB ? formatInfo.sRGB_opposite : desc.format;
+
+		// Create an unordered access texture with one less miplevel
+		TextureDesc unorderedDesc;
+		unorderedDesc.extent = nextMipExtent;
+		unorderedDesc.format = format_non_sRGB;
+		unorderedDesc.usage = TextureUsage::UnorderedAccess;
+		unorderedDesc.msaa = MSAA::Disabled;
+		unorderedDesc.isCubemap = false;
+		unorderedDesc.numFaces = desc.numFaces;
+		unorderedDesc.mipLevels = desc.mipLevels - 1;
+		unorderedDesc.createDescriptors = false;
+		std::unique_ptr<Texture> unorderedTexture = Texture::Create(context, unorderedDesc);
+		if (!unorderedTexture)
+		{
+			return DetailedResult::Fail("Failed to create unordered access texture for mipmap generation.");
+		}
+		const Texture& unorderedRef = *unorderedTexture;
+		context.DelayedDestroyTexture(std::move(unorderedTexture));
+
+		cmd.AddTextureBarrierAtSubresource(*this, SimpleBarrier::Discard, SimpleBarrier::CopyDest, 0, 0);
+		cmd.FlushBarriers();
+
+		// Upload the first and largest mipmap to this texture
+		SetPixelsAtSubresource(cmd, image, 0, 0);
+
+		struct MipmapGenPushConstants
+		{
+			uint32_t srcTextureIndex = IGLO_UINT32_MAX;
+			uint32_t destTextureIndex = IGLO_UINT32_MAX;
+			uint32_t bilinearClampSamplerIndex = IGLO_UINT32_MAX;
+			uint32_t is_sRGB = 0;
+			Vector2 inverseDestTextureSize;
+		};
+		MipmapGenPushConstants pushConstants;
+		pushConstants.bilinearClampSamplerIndex = context.GetBilinearClampSamplerDescriptor().heapIndex;
+		pushConstants.is_sRGB = formatInfo.is_sRGB;
+
+		for (uint32_t i = 0; i < desc.mipLevels - 1; i++)
+		{
+			DescriptorHeap& heap = context.GetDescriptorHeap();
+
+			Descriptor srv = heap.AllocateTemp(DescriptorType::Texture_SRV);
+			Descriptor uav = heap.AllocateTemp(DescriptorType::Texture_UAV);
+			pushConstants.srcTextureIndex = srv.heapIndex;
+			pushConstants.destTextureIndex = uav.heapIndex;
+
+			Extent2D destDimensions = Image::CalculateMipExtent(image.GetExtent(), i + 1);
+			pushConstants.inverseDestTextureSize = Vector2(1.0f / (float)destDimensions.width, 1.0f / (float)destDimensions.height);
+
+#ifdef IGLO_D3D12
+			auto device = context.GetD3D12Device();
+
+			// SRV
+			D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc = {};
+			srvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+			srvDesc.Format = GetFormatInfoDXGI(image.GetFormat()).dxgiFormat;
+			srvDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+			srvDesc.Texture2D.MipLevels = 1;
+			srvDesc.Texture2D.MostDetailedMip = i;
+			device->CreateShaderResourceView(this->GetD3D12Resource(), &srvDesc, heap.GetD3D12CPUHandle(srv));
+
+			// UAV
+			D3D12_UNORDERED_ACCESS_VIEW_DESC uavDesc = {};
+			uavDesc.Format = GetFormatInfoDXGI(format_non_sRGB).dxgiFormat;
+			uavDesc.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D;
+			uavDesc.Texture2D.MipSlice = i;
+			device->CreateUnorderedAccessView(unorderedRef.GetD3D12Resource(), nullptr, &uavDesc, heap.GetD3D12CPUHandle(uav));
+#endif
+#ifdef IGLO_VULKAN
+			VkDevice device = context.GetVulkanDevice();
+
+			// SRV
+			VkImageViewCreateInfo srcViewInfo = {};
+			srcViewInfo.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+			srcViewInfo.image = GetVulkanImage();
+			srcViewInfo.viewType = VK_IMAGE_VIEW_TYPE_2D;
+			srcViewInfo.format = ToVulkanFormat(image.GetFormat());
+			srcViewInfo.components.r = VK_COMPONENT_SWIZZLE_IDENTITY;
+			srcViewInfo.components.g = VK_COMPONENT_SWIZZLE_IDENTITY;
+			srcViewInfo.components.b = VK_COMPONENT_SWIZZLE_IDENTITY;
+			srcViewInfo.components.a = VK_COMPONENT_SWIZZLE_IDENTITY;
+			srcViewInfo.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+			srcViewInfo.subresourceRange.baseMipLevel = i;
+			srcViewInfo.subresourceRange.levelCount = 1;
+			srcViewInfo.subresourceRange.baseArrayLayer = 0;
+			srcViewInfo.subresourceRange.layerCount = 1;
+			VkImageView srcImageView = VK_NULL_HANDLE;
+			if (heap.CreateTempVulkanImageView(device, &srcViewInfo, nullptr, &srcImageView) != VK_SUCCESS)
+			{
+				return DetailedResult::Fail("Failed to create source image view for mipmap generation.");
+			}
+			heap.WriteImageDescriptor(srv, srcImageView, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+
+			// UAV
+			VkImageViewCreateInfo destViewInfo = srcViewInfo;
+			destViewInfo.image = unorderedRef.GetVulkanImage();
+			destViewInfo.format = ToVulkanFormat(format_non_sRGB);
+			VkImageView destImageView = VK_NULL_HANDLE;
+			if (heap.CreateTempVulkanImageView(device, &destViewInfo, nullptr, &destImageView) != VK_SUCCESS)
+			{
+				return DetailedResult::Fail("Failed to create destination image view for mipmap generation.");
+			}
+			heap.WriteImageDescriptor(uav, destImageView, VK_IMAGE_LAYOUT_GENERAL);
+
+#endif
+
+			cmd.AddTextureBarrierAtSubresource(*this, SimpleBarrier::CopyDest, SimpleBarrier::ComputeShaderResource, 0, i);
+			cmd.AddTextureBarrierAtSubresource(unorderedRef, SimpleBarrier::Discard, SimpleBarrier::ComputeShaderUnorderedAccess, 0, i);
+			cmd.FlushBarriers();
+
+			cmd.SetPipeline(context.GetMipmapGenerationPipeline());
+			cmd.SetComputePushConstants(&pushConstants, sizeof(pushConstants));
+			cmd.DispatchCompute(
+				std::max(destDimensions.width / 8, 1U),
+				std::max(destDimensions.height / 8, 1U),
+				1);
+
+			cmd.AddTextureBarrierAtSubresource(*this, SimpleBarrier::ComputeShaderResource, SimpleBarrier::PixelShaderResource, 0, i);
+			cmd.AddTextureBarrierAtSubresource(*this, SimpleBarrier::Discard, SimpleBarrier::CopyDest, 0, i + 1);
+			cmd.AddTextureBarrierAtSubresource(unorderedRef, SimpleBarrier::ComputeShaderUnorderedAccess, SimpleBarrier::CopySource, 0, i);
+			cmd.FlushBarriers();
+
+			cmd.CopyTextureSubresource(unorderedRef, 0, i, *this, 0, i + 1);
+		}
+
+		cmd.AddTextureBarrierAtSubresource(*this, SimpleBarrier::CopyDest, SimpleBarrier::PixelShaderResource, 0, desc.mipLevels - 1);
+		cmd.FlushBarriers();
+
+		return DetailedResult::Success();
+	}
+
+	void Texture::SetPixels(CommandList& cmd, const Image& srcImage)
+	{
+		assert(desc.usage != TextureUsage::Readable && "must have non-readable texture usage");
+		assert(desc.msaa == MSAA::Disabled && "texture must not be multisampled");
+		assert(srcImage.GetExtent() == desc.extent && "src image must match texture");
+		assert(srcImage.GetFormat() == desc.format && "src image must match texture");
+		assert(srcImage.GetNumFaces() == desc.numFaces && "src image must match texture");
+		assert(srcImage.GetMipLevels() == desc.mipLevels && "src image must match texture");
+
+#ifdef IGLO_D3D12
+		uint64_t requiredUploadBufferSize = 0;
+		{
+			D3D12_RESOURCE_DESC resDesc = impl.resource[0]->GetDesc();
+			context.GetD3D12Device()->GetCopyableFootprints(&resDesc, 0, desc.numFaces * desc.mipLevels, 0,
+				nullptr, nullptr, nullptr, &requiredUploadBufferSize);
+		}
+#endif
+#ifdef IGLO_VULKAN
+		uint64_t requiredUploadBufferSize = GetRequiredUploadBufferSize(srcImage, context.GetGraphicsSpecs().bufferPlacementAlignments);
+#endif
+
+		TempBuffer tempBuffer = context.GetUploadHeap().AllocateTempBuffer(requiredUploadBufferSize,
+			context.GetGraphicsSpecs().bufferPlacementAlignments.texture);
+
+		byte* destPtr = (byte*)tempBuffer.data;
+		byte* srcPtr = (byte*)srcImage.GetPixels();
+		for (uint32_t faceIndex = 0; faceIndex < srcImage.GetNumFaces(); faceIndex++)
+		{
+			for (uint32_t mipIndex = 0; mipIndex < srcImage.GetMipLevels(); mipIndex++)
+			{
+				size_t srcRowPitch = srcImage.GetMipRowPitch(mipIndex);
+				uint64_t destRowPitch = AlignUp(srcRowPitch, context.GetGraphicsSpecs().bufferPlacementAlignments.textureRowPitch);
+				for (uint64_t srcProgress = 0; srcProgress < srcImage.GetMipSize(mipIndex); srcProgress += srcRowPitch)
+				{
+					memcpy(destPtr, srcPtr, srcRowPitch);
+					srcPtr += srcRowPitch;
+					destPtr += destRowPitch;
+					assert(srcProgress + srcRowPitch <= srcImage.GetMipSize(mipIndex));
+				}
+			}
+		}
+
+		cmd.CopyTempBufferToTexture(tempBuffer, *this);
+	}
+
+	void Texture::SetPixels(CommandList& cmd, const void* pixelData)
+	{
+		assert(pixelData != nullptr);
+
+		ImageDesc imageDesc;
+		imageDesc.extent = desc.extent;
+		imageDesc.format = desc.format;
+		imageDesc.mipLevels = desc.mipLevels;
+		imageDesc.numFaces = desc.numFaces;
+		imageDesc.isCubemap = desc.isCubemap;
+
+		std::unique_ptr<Image> image = Image::CreateWrapped((byte*)pixelData, imageDesc);
+
+		SetPixels(cmd, *image);
+	}
+
+	void Texture::SetPixelsAtSubresource(CommandList& cmd, const Image& srcImage, uint32_t destFaceIndex, uint32_t destMipIndex)
+	{
+		assert(desc.usage != TextureUsage::Readable && "must have non-readable texture usage");
+		assert(desc.msaa == MSAA::Disabled && "texture must not be multisampled");
+		assert(srcImage.GetExtent() == Image::CalculateMipExtent(desc.extent, destMipIndex) &&
+			"src image extent must match texture subresource extent");
+		assert(srcImage.GetFormat() == desc.format && "src image must have same format as texture");
+		assert(srcImage.GetNumFaces() == 1 && "src image must have 1 face");
+		assert(srcImage.GetMipLevels() == 1 && "src image must have 1 mip");
+
+#ifdef IGLO_D3D12
+		uint32_t subResourceIndex = (destFaceIndex * desc.mipLevels) + destMipIndex;
+		uint64_t requiredUploadBufferSize = 0;
+		{
+			D3D12_RESOURCE_DESC resDesc = impl.resource[0]->GetDesc();
+			context.GetD3D12Device()->GetCopyableFootprints(&resDesc, subResourceIndex, 1, 0, nullptr, nullptr, nullptr, &requiredUploadBufferSize);
+		}
+#endif
+#ifdef IGLO_VULKAN
+		uint64_t requiredUploadBufferSize = GetRequiredUploadBufferSize(srcImage, context.GetGraphicsSpecs().bufferPlacementAlignments);
+#endif
+
+		TempBuffer tempBuffer = context.GetUploadHeap().AllocateTempBuffer(requiredUploadBufferSize,
+			context.GetGraphicsSpecs().bufferPlacementAlignments.texture);
+
+		byte* destPtr = (byte*)tempBuffer.data;
+		byte* srcPtr = (byte*)srcImage.GetPixels();
+		size_t srcRowPitch = srcImage.GetMipRowPitch(0);
+		uint64_t destRowPitch = AlignUp(srcRowPitch, context.GetGraphicsSpecs().bufferPlacementAlignments.textureRowPitch);
+		for (uint64_t srcProgress = 0; srcProgress < srcImage.GetMipSize(0); srcProgress += srcRowPitch)
+		{
+			memcpy(destPtr, srcPtr, srcRowPitch);
+			srcPtr += srcRowPitch;
+			destPtr += destRowPitch;
+			assert(srcProgress + srcRowPitch <= srcImage.GetMipSize(0));
+		}
+
+		cmd.CopyTempBufferToTextureSubresource(tempBuffer, *this, destFaceIndex, destMipIndex);
+	}
+
+	void Texture::SetPixelsAtSubresource(CommandList& cmd, const void* pixelData, uint32_t destFaceIndex, uint32_t destMipIndex)
+	{
+		assert(pixelData != nullptr);
+
+		ImageDesc imageDesc;
+		imageDesc.extent = Image::CalculateMipExtent(desc.extent, destMipIndex);
+		imageDesc.format = desc.format;
+
+		std::unique_ptr<Image> image = Image::CreateWrapped((byte*)pixelData, imageDesc);
+
+		SetPixelsAtSubresource(cmd, *image, destFaceIndex, destMipIndex);
+	}
+
+	void Texture::ReadPixels(Image& destImage)
+	{
+		assert(desc.usage == TextureUsage::Readable && "must have readable texture usage");
+		assert(desc.msaa == MSAA::Disabled && "texture must not be multisampled");
+		assert(destImage.GetExtent() == desc.extent && "image must match texture");
+		assert(destImage.GetFormat() == desc.format && "image must match texture");
+		assert(destImage.GetNumFaces() == desc.numFaces && "image must match texture");
+		assert(destImage.GetMipLevels() == desc.mipLevels && "image must match texture");
+		assert(readMapped.size() == context.GetMaxFramesInFlight());
+
+		byte* destPtr = (byte*)destImage.GetPixels();
+		byte* srcPtr = (byte*)readMapped[context.GetFrameIndex()];
+		const uint32_t textureRowPitch = context.GetGraphicsSpecs().bufferPlacementAlignments.textureRowPitch;
+		for (uint32_t faceIndex = 0; faceIndex < desc.numFaces; faceIndex++)
+		{
+			for (uint32_t mipIndex = 0; mipIndex < desc.mipLevels; mipIndex++)
+			{
+				size_t srcRowPitch = AlignUp(Image::CalculateMipRowPitch(desc.extent, desc.format, mipIndex), textureRowPitch);
+				size_t destRowPitch = destImage.GetMipRowPitch(mipIndex);
+				for (uint64_t destProgress = 0; destProgress < destImage.GetMipSize(mipIndex); destProgress += destRowPitch)
+				{
+					memcpy(destPtr, srcPtr, destRowPitch);
+					srcPtr += srcRowPitch;
+					destPtr += destRowPitch;
+					assert(destProgress + destRowPitch <= destImage.GetMipSize(mipIndex));
+				}
+			}
+		}
+	}
+
+	std::unique_ptr<Image> Texture::ReadPixels()
+	{
+		ImageDesc imageDesc =
+		{
+			.extent = desc.extent,
+			.format = desc.format,
+			.mipLevels = desc.mipLevels,
+			.numFaces = desc.numFaces,
+			.isCubemap = desc.isCubemap,
+		};
+
+		std::unique_ptr<Image> image = Image::Create(imageDesc);
+		if (!image)
+		{
+			Log(LogType::Error, "Failed to read texture pixels to image. Reason: Failed to create image.");
+			return nullptr;
+		}
+
+		ReadPixels(*image);
+		return image;
+	}
+
+	Sampler::~Sampler()
+	{
+#ifdef IGLO_VULKAN
+		if (vkSampler)
+		{
+			vkDestroySampler(context.GetVulkanDevice(), vkSampler, nullptr);
+			vkSampler = VK_NULL_HANDLE;
+		}
+#endif
+
+		if (descriptor)
+		{
+			context.GetDescriptorHeap().FreePersistent(descriptor);
+			descriptor.SetToNull();
+		}
+	}
+
+	std::unique_ptr<Sampler> Sampler::Create(const IGLOContext& context, const SamplerDesc& desc)
+	{
+		const char* errStr = "Failed to create sampler state. Reason: ";
+
+		std::unique_ptr<Sampler> out = std::unique_ptr<Sampler>(new Sampler(context));
+
+		DetailedResult result = out->Impl_Create(desc);
+		if (!result)
+		{
+			Log(LogType::Error, ToString(errStr, result.errorMessage));
+			return nullptr;
+		}
+
+		return out;
+	}
+
+	Descriptor Sampler::GetDescriptor() const
+	{
+		assert(descriptor);
+		return descriptor;
+	}
+
+} //end of namespace ig
