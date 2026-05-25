@@ -15,7 +15,7 @@ set(PROJECT_SOURCES
 )
 
 # iglo
-set(IGLO_INCLUDE_DIR "${CMAKE_SOURCE_DIR}/extern/iglo-0.4.2")
+set(IGLO_INCLUDE_DIR "${CMAKE_SOURCE_DIR}/extern/iglo-0.5.1")
 set(IGLO_SOURCES
     ${IGLO_INCLUDE_DIR}/iglo.h
     ${IGLO_INCLUDE_DIR}/iglo.cpp
@@ -45,7 +45,7 @@ set(IGLO_SOURCES
 if (MSVC)
 
     # set Agility SDK version
-    set(AGILITY_SDK_VERSION "1.717.1-preview")
+    set(AGILITY_SDK_VERSION "1.619.2")
 
     # set download URL for Agility SDK
     set(AGILITY_SDK_URL "https://www.nuget.org/api/v2/package/Microsoft.Direct3D.D3D12/${AGILITY_SDK_VERSION}")

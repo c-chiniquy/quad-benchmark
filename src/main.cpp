@@ -6,7 +6,7 @@
 
 #ifdef IGLO_D3D12
 // Agility SDK path and version
-extern "C" { __declspec(dllexport) extern const UINT D3D12SDKVersion = 717; }
+extern "C" { __declspec(dllexport) extern const UINT D3D12SDKVersion = 619; }
 extern "C" { __declspec(dllexport) extern const char* D3D12SDKPath = ".\\D3D12\\"; }
 #endif
 
@@ -30,7 +30,7 @@ public:
 		context = ig::IGLOContext::CreateContext(
 			ig::WindowSettings
 			{
-				.title = "Quad rendering benchmark (D3D12)",
+				.title = "Quad rendering benchmark",
 				.width = 640,
 				.height = 480,
 				.resizable = false,
@@ -39,7 +39,7 @@ public:
 			},
 			ig::RenderSettings
 			{
-				ig::PresentMode::ImmediateWithTearing,
+				ig::PresentMode::Immediate,
 			});
 		if (context)
 		{
@@ -244,14 +244,17 @@ private:
 			cmd->AddTextureBarrier(context->GetBackBuffer(), ig::SimpleBarrier::Discard, ig::SimpleBarrier::RenderTarget);
 			cmd->FlushBarriers();
 
-			cmd->SetRenderTarget(&context->GetBackBuffer());
-			cmd->SetViewport((float)context->GetWidth(), (float)context->GetHeight());
-			cmd->SetScissorRectangle(context->GetWidth(), context->GetHeight());
-			cmd->ClearColor(context->GetBackBuffer(), ig::Colors::Red);
+			cmd->BeginRenderPass(&context->GetBackBuffer());
+			{
+				cmd->SetViewport((float)context->GetWidth(), (float)context->GetHeight());
+				cmd->SetScissorRectangle(context->GetWidth(), context->GetHeight());
+				cmd->ClearColor(context->GetBackBuffer(), ig::Colors::Red);
 
-			if (currentBenchmark >= benchmarks.size()) ig::Fatal("currentBenchmark out of bounds");
-			benchmarks[currentBenchmark]->OnUpdate();
-			benchmarks[currentBenchmark]->OnRender(*cmd);
+				if (currentBenchmark >= benchmarks.size()) ig::Fatal("currentBenchmark out of bounds");
+				benchmarks[currentBenchmark]->OnUpdate();
+				benchmarks[currentBenchmark]->OnRender(*cmd);
+			}
+			cmd->EndRenderPass();
 
 			cmd->AddTextureBarrier(context->GetBackBuffer(), ig::SimpleBarrier::RenderTarget, ig::SimpleBarrier::Present);
 			cmd->FlushBarriers();
