@@ -43,8 +43,8 @@ public:
 			});
 		if (context)
 		{
-			context->SetOnDeviceRemovedCallback(std::bind(&App::OnDeviceRemoved, this, std::placeholders::_1));
-			mainloop.SetWindowMinimizedBehaviour(ig::MainLoop::WindowMinimizedBehaviour::None);
+			context->SetOnDeviceLostCallback(std::bind(&App::OnDeviceLost, this));
+			mainloop.SetWindowMinimizedBehaviour(ig::WindowMinimizedBehaviour::None);
 
 			mainloop.Run(*context,
 				std::bind(&App::Start, this),
@@ -265,9 +265,9 @@ private:
 		context->Present();
 	}
 
-	void OnDeviceRemoved(const std::string& deviceRemovalReason)
+	void OnDeviceLost()
 	{
-		ig::PopupMessage("Device removal detected! The app will now exit.", "Error", context.get());
+		ig::PopupMessage("Graphics device has been lost! The app will now exit.", "Error", context.get());
 		mainloop.Quit();
 	}
 };

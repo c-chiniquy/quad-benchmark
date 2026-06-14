@@ -572,8 +572,8 @@ namespace ig
 	}
 
 	std::unique_ptr<Pipeline> Pipeline::LoadFromFile(const IGLOContext& context,
-		const std::string& filepathVS, const std::string& entryPointNameVS,
-		const std::string& filepathPS, const std::string& entryPointNamePS,
+		const std::string& filepathVS, const char* entryPointNameVS,
+		const std::string& filepathPS, const char* entryPointNamePS,
 		const RenderTargetDesc& renderTargetDesc, const std::vector<VertexElement>& vertexLayout,
 		PrimitiveTopology primitiveTopology, DepthDesc depth, RasterizerDesc rasterizer, const std::vector<BlendDesc>& blend)
 	{
@@ -602,8 +602,8 @@ namespace ig
 		}
 
 		return CreateGraphics(context,
-			Shader(VS.fileContent, entryPointNameVS),
-			Shader(PS.fileContent, entryPointNamePS),
+			Shader::FromByteVector(VS.fileContent, entryPointNameVS),
+			Shader::FromByteVector(PS.fileContent, entryPointNamePS),
 			renderTargetDesc, vertexLayout,
 			primitiveTopology, depth, rasterizer, blend);
 	}
@@ -883,12 +883,11 @@ namespace ig
 	SimpleBarrierInfo GetSimpleBarrierInfo(SimpleBarrier simpleBarrier, CommandListType queueType)
 	{
 		SimpleBarrierInfo out;
-		out.discard = (simpleBarrier == SimpleBarrier::Discard);
 
-		bool isGraphicsQueue = (queueType == CommandListType::Graphics);
-		bool isComputeQueue = (queueType == CommandListType::Compute);
+		const bool isGraphicsQueue = (queueType == CommandListType::Graphics);
+		const bool isComputeQueue = (queueType == CommandListType::Compute);
 #ifdef IGLO_D3D12
-		bool isCopyQueue = (queueType == CommandListType::Copy);
+		const bool isCopyQueue = (queueType == CommandListType::Copy);
 #endif
 
 		switch (simpleBarrier)
@@ -914,9 +913,10 @@ namespace ig
 			break;
 
 		case SimpleBarrier::Discard:
-			out.sync = BarrierSync::None;
+			out.sync = BarrierSync::All;
 			out.access = BarrierAccess::NoAccess;
 			out.layout = BarrierLayout::Undefined;
+			out.discard = true;
 			break;
 
 		case SimpleBarrier::PixelShaderResource:
@@ -1019,7 +1019,7 @@ namespace ig
 			if (isComputeQueue) out.layout = BarrierLayout::_ComputeQueue_UnorderedAccess;
 #endif
 #ifdef IGLO_VULKAN
-			out.sync = BarrierSync::Copy;
+			out.sync = BarrierSync::ClearUnorderedAccessView;
 			out.access = BarrierAccess::CopyDest;
 			out.layout = BarrierLayout::CopyDest;
 #endif
@@ -1032,7 +1032,7 @@ namespace ig
 			out.layout = BarrierLayout::RenderTarget;
 #endif
 #ifdef IGLO_VULKAN
-			out.sync = BarrierSync::Copy;
+			out.sync = BarrierSync::Clear;
 			out.access = BarrierAccess::CopyDest;
 			out.layout = BarrierLayout::CopyDest;
 #endif
@@ -1068,9 +1068,7 @@ namespace ig
 
 	void CommandList::ClearColor(const Texture& renderTexture, Color color, uint32_t numRects, const IntRect* rects)
 	{
-		assert(
-			renderTexture.GetUsage() == TextureUsage::RenderTexture ||
-			renderTexture.GetUsage() == TextureUsage::UnorderedAccessRenderTexture);
+		assert(renderTexture.GetUsage() == TextureUsage::RenderTexture || renderTexture.GetUsage() == TextureUsage::UnorderedAccessRenderTexture);
 		if (numRects > 0)
 		{
 			assert(rects != nullptr);
@@ -1097,13 +1095,13 @@ namespace ig
 
 	void CommandList::ClearUnorderedAccessTextureFloat(const Texture& texture, const float values[4])
 	{
-		assert(texture.GetUsage() == TextureUsage::UnorderedAccess);
+		assert(texture.GetUsage() == TextureUsage::UnorderedAccess || texture.GetUsage() == TextureUsage::UnorderedAccessRenderTexture);
 		Impl_ClearUnorderedAccessTextureFloat(texture, values);
 	}
 
 	void CommandList::ClearUnorderedAccessTextureUInt32(const Texture& texture, const uint32_t values[4])
 	{
-		assert(texture.GetUsage() == TextureUsage::UnorderedAccess);
+		assert(texture.GetUsage() == TextureUsage::UnorderedAccess || texture.GetUsage() == TextureUsage::UnorderedAccessRenderTexture);
 		Impl_ClearUnorderedAccessTextureUInt32(texture, values);
 	}
 
@@ -1908,6 +1906,10 @@ namespace ig
 		{
 			return DetailedResult::Fail("mipLevels and numFaces must be 1 or higher.");
 		}
+		if (mipLevels >= 32) // 32-bit bitshift limit
+		{
+			return DetailedResult::Fail("mipLevels is too high.");
+		}
 		if (isCubemap && (numFaces % 6 != 0))
 		{
 			return DetailedResult::Fail("The number of faces in a cubemap image must be a multiple of 6.");
@@ -1993,6 +1995,8 @@ namespace ig
 
 	size_t Image::CalculateMipSize(Extent2D extent, Format format, uint32_t mipIndex)
 	{
+		if (mipIndex >= 32) Fatal("mipIndex too high");
+
 		FormatInfo info = GetFormatInfo(format);
 		uint32_t mipWidth = std::max(uint32_t(1), extent.width >> mipIndex);
 		uint32_t mipHeight = std::max(uint32_t(1), extent.height >> mipIndex);
@@ -2008,6 +2012,8 @@ namespace ig
 
 	uint32_t Image::CalculateMipRowPitch(Extent2D extent, Format format, uint32_t mipIndex)
 	{
+		if (mipIndex >= 32) Fatal("mipIndex too high");
+
 		FormatInfo info = GetFormatInfo(format);
 		uint32_t mipWidth = std::max(uint32_t(1), extent.width >> mipIndex);
 		if (info.blockSize > 0) // Block-compressed format
@@ -2022,6 +2028,8 @@ namespace ig
 
 	Extent2D Image::CalculateMipExtent(Extent2D extent, uint32_t mipIndex)
 	{
+		if (mipIndex >= 32) Fatal("mipIndex too high");
+
 		Extent2D mipExtent;
 		mipExtent.width = std::max(uint32_t(1), extent.width >> mipIndex);
 		mipExtent.height = std::max(uint32_t(1), extent.height >> mipIndex);
@@ -2660,69 +2668,73 @@ namespace ig
 
 	void IGLOContext::Present()
 	{
-#ifdef IGLO_D3D12
-		HRESULT hr = 0;
-		switch (swapChain.presentMode)
-		{
-		case PresentMode::Immediate:
-			hr = graphics.swapChain->Present(0, DXGI_PRESENT_ALLOW_TEARING);
-			break;
-		case PresentMode::Mailbox:
-			hr = graphics.swapChain->Present(0, 0);
-			break;
-		case PresentMode::Vsync:
-			hr = graphics.swapChain->Present(1, 0);
-			break;
-		case PresentMode::VsyncHalf:
-			hr = graphics.swapChain->Present(2, 0);
-			break;
-		default:
-			Log(LogType::Error, "Presentation failed. Reason: Invalid present mode.");
-			break;
-		}
-		if (FAILED(hr))
-		{
-			Log(LogType::Error, ToString("Presentation failed. Reason: IDXGISwapChain::Present returned error code: ", (uint32_t)hr, "."));
+		Impl_Present();
 
-			hr = graphics.device->GetDeviceRemovedReason();
-			if (FAILED(hr))
-			{
-				std::string reasonStr;
-				switch (hr)
-				{
-				case DXGI_ERROR_DEVICE_HUNG: reasonStr = "The device has hung."; break;
-				case DXGI_ERROR_DEVICE_REMOVED: reasonStr = "The device was removed."; break;
-				case DXGI_ERROR_DEVICE_RESET: reasonStr = "The device was reset."; break;
-
-				default:
-					reasonStr = "Unknown device removal reason.";
-					break;
-				}
-				Log(LogType::Error, "Device removal detected! Reason: " + reasonStr);
-				if (callbackOnDeviceRemoved) callbackOnDeviceRemoved(reasonStr);
-			}
-		}
-
-		// Wait until the swap chain is ready to present the next frame.
-		// This ensures that the value passed to SetMaximumFrameLatency() is respected.
-		// Waiting for this at the start of the next frame reduces input latency.
-		// Info:
-		// https://learn.microsoft.com/en-us/windows/uwp/gaming/reduce-latency-with-dxgi-1-3-swap-chains
-		// https://www.intel.com/content/www/us/en/developer/articles/code-sample/sample-application-for-direct3d-12-flip-model-swap-chains.html
-		HANDLE swapchainWaitableObject = graphics.swapChain->GetFrameLatencyWaitableObject();
-		WaitForSingleObjectEx(swapchainWaitableObject, 1000, true);
-#endif
-#ifdef IGLO_VULKAN
-		if (graphics.validSwapChain)
-		{
-			VkResult result = commandQueue->Present(graphics.swapChain);
-			HandleVulkanSwapChainResult(result, "presentation");
-		}
-#endif
+		swapChain.hasPresented = true;
 
 		endOfFrame.at(frameIndex).graphicsReceipt = commandQueue->SubmitSignal(CommandListType::Graphics);
+	}
 
-		MoveToNextFrame();
+	void IGLOContext::MoveToNextFrame()
+	{
+		frameIndex = (frameIndex + 1) % numFramesInFlight;
+
+		assert(numFramesInFlight <= maxFramesInFlight);
+		assert(numFramesInFlight <= swapChain.numBackBuffers);
+		assert(frameIndex < endOfFrame.size());
+
+		EndOfFrame& currentFrame = endOfFrame[frameIndex];
+		commandQueue->WaitForCompletion(currentFrame.graphicsReceipt);
+		commandQueue->WaitForCompletion(currentFrame.computeReceipt);
+		commandQueue->WaitForCompletion(currentFrame.copyReceipt);
+
+		currentFrame.DestroyResources(*this);
+
+		descriptorHeap->NextFrame();
+		uploadHeap->NextFrame();
+
+		if (!deviceLost)
+		{
+			if (PollDeviceLost()) NotifyDeviceLost();
+		}
+		if (deviceLost) return;
+
+		if (swapChain.hasPresented && swapChain.isValid)
+		{
+			swapChain.hasPresented = false;
+			PostPresent();
+		}
+		if (!swapChain.isValid)
+		{
+			swapChain.hasPresented = false;
+			AttemptRepairSwapChain();
+		}
+	}
+
+	void IGLOContext::NotifyDeviceLost()
+	{
+		swapChain.isValid = false;
+		if (deviceLost) return;
+
+		deviceLost = true;
+
+		std::string errStr = "Graphics device lost";
+
+#ifdef IGLO_D3D12
+		HRESULT hr = graphics.device->GetDeviceRemovedReason();
+		switch (hr)
+		{
+		case DXGI_ERROR_DEVICE_HUNG: errStr += " (hung)"; break;
+		case DXGI_ERROR_DEVICE_REMOVED: errStr += " (removed)"; break;
+		case DXGI_ERROR_DEVICE_RESET: errStr += " (reset)"; break;
+
+		default:
+			break;
+		}
+#endif
+
+		Log(LogType::Error, ToString(errStr, "."));
+		if (callbackOnDeviceLost) callbackOnDeviceLost();
 	}
 
 	Receipt IGLOContext::Submit(const CommandList& commandList)
@@ -2802,52 +2814,7 @@ namespace ig
 				currentView = VK_NULL_HANDLE;
 			}
 		}
-#endif
-	}
-
-	void IGLOContext::MoveToNextFrame()
-	{
-		frameIndex = (frameIndex + 1) % numFramesInFlight;
-
-		assert(numFramesInFlight <= maxFramesInFlight);
-		assert(numFramesInFlight <= swapChain.numBackBuffers);
-		assert(frameIndex < endOfFrame.size());
-
-		EndOfFrame& currentFrame = endOfFrame[frameIndex];
-		commandQueue->WaitForCompletion(currentFrame.graphicsReceipt);
-		commandQueue->WaitForCompletion(currentFrame.computeReceipt);
-		commandQueue->WaitForCompletion(currentFrame.copyReceipt);
-
-		currentFrame.DestroyResources(*this);
-
-		descriptorHeap->NextFrame();
-		uploadHeap->NextFrame();
-
-#ifdef IGLO_VULKAN
-		if (graphics.validSwapChain)
-		{
-			VkResult result = commandQueue->AcquireNextVulkanSwapChainImage(graphics.device, graphics.swapChain, UINT64_MAX);
-			HandleVulkanSwapChainResult(result, "image acquisition");
-		}
-		if (!graphics.validSwapChain)
-		{
-			WaitForIdleDevice();
-
-			// To prevent error messages from being spammed when user resizes window to {0,0},
-			// we wait with replacing the swapchain until window size is valid.
-			VkSurfaceCapabilitiesKHR caps = {};
-			vkGetPhysicalDeviceSurfaceCapabilitiesKHR(graphics.physicalDevice, graphics.surface, &caps);
-			if (caps.maxImageExtent.width > 0 && caps.maxImageExtent.height > 0)
-			{
-				DetailedResult dr = CreateSwapChain(swapChain.extent, swapChain.format, swapChain.numBackBuffers,
-					numFramesInFlight, swapChain.presentMode);
-				if (!dr)
-				{
-					Log(LogType::Error, "Failed to replace swapchain. Reason: " + dr.errorMessage);
-				}
-			}
-			WaitForIdleDevice();
-		}
+		delayedDestroyVulkanImageViews.clear();
 #endif
 	}
 
@@ -3600,7 +3567,7 @@ namespace ig
 		}
 
 		cmd.CopyTempBufferToTexture(tempBuffer, *this);
-		}
+	}
 
 	void Texture::SetPixels(CommandList& cmd, const void* pixelData)
 	{
@@ -3656,7 +3623,7 @@ namespace ig
 		}
 
 		cmd.CopyTempBufferToTextureSubresource(tempBuffer, *this, destFaceIndex, destMipIndex);
-		}
+	}
 
 	void Texture::SetPixelsAtSubresource(CommandList& cmd, const void* pixelData, uint32_t destFaceIndex, uint32_t destMipIndex)
 	{
@@ -3767,4 +3734,4 @@ namespace ig
 		return descriptor;
 	}
 
-	} //end of namespace ig
+} //end of namespace ig

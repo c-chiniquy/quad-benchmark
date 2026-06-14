@@ -8,8 +8,8 @@
 
 // -------------------- Version --------------------//
 #define IGLO_VERSION_MAJOR 0
-#define IGLO_VERSION_MINOR 5
-#define IGLO_VERSION_PATCH 1
+#define IGLO_VERSION_MINOR 6
+#define IGLO_VERSION_PATCH 0
 
 #define IGLO_STRINGIFY_HELPER(x) #x
 #define IGLO_STRINGIFY(x) IGLO_STRINGIFY_HELPER(x)
@@ -200,7 +200,7 @@ namespace ig
 {
 	// Callbacks
 	using CallbackModalLoop = std::function<void()>;
-	using CallbackOnDeviceRemoved = std::function<void(const std::string& deviceRemovalReason)>;
+	using CallbackOnDeviceLost = std::function<void()>;
 
 	void PopupMessage(const std::string& message, const std::string& caption = "", const IGLOContext* parent = nullptr);
 
@@ -1111,10 +1111,11 @@ namespace ig
 
 		ID3D12Resource* GetD3D12Resource() const;
 
-		static D3D12_SHADER_RESOURCE_VIEW_DESC GenerateD3D12Desc_SRV(Format, MSAA, uint32_t mipLevels, uint32_t numFaces, bool isCubemap);
-		static D3D12_UNORDERED_ACCESS_VIEW_DESC GenerateD3D12Desc_UAV(Format, MSAA, uint32_t numFaces);
-		static D3D12_RENDER_TARGET_VIEW_DESC GenerateD3D12Desc_RTV(Format, MSAA, uint32_t numFaces);
-		static D3D12_DEPTH_STENCIL_VIEW_DESC GenerateD3D12Desc_DSV(Format, MSAA, uint32_t numFaces);
+		static D3D12_SHADER_RESOURCE_VIEW_DESC GenerateD3D12Desc_SRV(Format, MSAA, bool isCubemap, uint32_t numFaces,
+			uint32_t baseMip = 0, uint32_t mipLevels = IGLO_UINT32_MAX);
+		static D3D12_UNORDERED_ACCESS_VIEW_DESC GenerateD3D12Desc_UAV(Format, MSAA, uint32_t numFaces, uint32_t mipIndex = 0);
+		static D3D12_RENDER_TARGET_VIEW_DESC GenerateD3D12Desc_RTV(Format, MSAA, uint32_t numFaces, uint32_t mipIndex = 0);
+		static D3D12_DEPTH_STENCIL_VIEW_DESC GenerateD3D12Desc_DSV(Format, MSAA, uint32_t numFaces, uint32_t mipIndex = 0);
 #endif
 #ifdef IGLO_VULKAN
 		VkImage GetVulkanImage() const;
@@ -1295,27 +1296,29 @@ namespace ig
 
 	struct Shader
 	{
+		static constexpr const char* DefaultEntryPointName = "main";
+
 		Shader() = default;
 
-		// Specifying 'entryPointName' is mandatory in Vulkan, but not necessary in D3D12.
-		Shader(const byte* shaderBytecode, size_t bytecodeLength, const std::string& entryPointName = "main")
+		// On Vulkan, you are required to specify 'entryPointName'.
+		// On D3D12, 'entryPointName' is ignored.
+		Shader(const byte* shaderBytecode, size_t bytecodeLength, const char* entryPointName = DefaultEntryPointName)
+			: shaderBytecode(shaderBytecode), bytecodeLength(bytecodeLength), entryPointName(entryPointName)
 		{
-			this->shaderBytecode = shaderBytecode;
-			this->bytecodeLength = bytecodeLength;
-			this->entryPointName = entryPointName;
 		}
 
-		Shader(std::vector<byte>&& shaderBytecode, const std::string& entryPointName) = delete;
-		Shader(const std::vector<byte>& shaderBytecode, const std::string& entryPointName = "main")
+		static Shader FromByteVector(const std::vector<byte>& shaderBytecode)
 		{
-			this->shaderBytecode = shaderBytecode.data();
-			this->bytecodeLength = shaderBytecode.size();
-			this->entryPointName = entryPointName;
+			return Shader(shaderBytecode.data(), shaderBytecode.size());
+		}
+		static Shader FromByteVector(const std::vector<byte>& shaderBytecode, const char* entryPointName)
+		{
+			return Shader(shaderBytecode.data(), shaderBytecode.size(), entryPointName);
 		}
 
 		const byte* shaderBytecode = nullptr;
 		size_t bytecodeLength = 0;
-		std::string entryPointName;
+		const char* entryPointName = DefaultEntryPointName;
 	};
 
 	struct RenderTargetDesc
@@ -1378,8 +1381,8 @@ namespace ig
 		// Vertex shader bytecode and pixel shader bytecode is loaded from file.
 		// You must provide one blend state (BlendDesc) for each expected render texture.
 		static std::unique_ptr<Pipeline> LoadFromFile(const IGLOContext&,
-			const std::string& filepathVS, const std::string& entryPointNameVS,
-			const std::string& filepathPS, const std::string& entryPointNamePS,
+			const std::string& filepathVS, const char* entryPointNameVS,
+			const std::string& filepathPS, const char* entryPointNamePS,
 			const RenderTargetDesc&, const std::vector<VertexElement>&,
 			PrimitiveTopology, DepthDesc, RasterizerDesc, const std::vector<BlendDesc>&);
 
@@ -1475,7 +1478,9 @@ namespace ig
 #ifdef IGLO_D3D12
 		D3D12_CPU_DESCRIPTOR_HANDLE GetD3D12CPUHandle(Descriptor) const;
 		D3D12_GPU_DESCRIPTOR_HANDLE GetD3D12GPUHandle(Descriptor) const;
-		D3D12_CPU_DESCRIPTOR_HANDLE GetD3D12CPUHandle_Reusable_UAV() const;
+		D3D12_CPU_DESCRIPTOR_HANDLE GetD3D12CPUHandle_Reusable_UAV() const; // Reusable UAV heap has a size of 1
+		D3D12_CPU_DESCRIPTOR_HANDLE GetD3D12CPUHandle_Reusable_RTV() const; // Reusable RTV heap has a size of MAX_SIMULTANEOUS_RENDER_TARGETS
+		D3D12_CPU_DESCRIPTOR_HANDLE GetD3D12CPUHandle_Reusable_DSV() const; // Reusable DSV heap has a size of 1
 		ID3D12DescriptorHeap* GetD3D12DescriptorHeap(DescriptorType) const;
 		ID3D12RootSignature* GetD3D12BindlessRootSignature() const { return impl.bindlessRootSignature.Get(); }
 		uint32_t GetD3D12DescriptorSize(DescriptorType) const;
@@ -1595,11 +1600,12 @@ namespace ig
 		ID3D12CommandQueue* GetD3D12CommandQueue(CommandListType type) const { return impl.commandQueues[(uint32_t)type].Get(); }
 #endif
 #ifdef IGLO_VULKAN
-		void RecreateSwapChainSemaphores(uint32_t numFramesInFlight, uint32_t numBackBuffers);
+		DetailedResult RecreateSwapChainSemaphores(uint32_t numFramesInFlight, uint32_t numBackBuffers);
 		void DestroySwapChainSemaphores();
 		Receipt SubmitBinaryWaitSignal(VkSemaphore binarySemaphore);
 		VkResult Present(VkSwapchainKHR swapChain);
 		VkResult AcquireNextVulkanSwapChainImage(VkDevice device, VkSwapchainKHR swapChain, uint64_t timeout);
+		bool CheckDeviceLoss() const;
 		uint32_t GetCurrentBackBufferIndex() { return impl.currentBackBufferIndex; }
 		VkQueue GetVulkanQueue(CommandListType type) const { return impl.queues[(uint32_t)type]; }
 		VkQueue GetVulkanPresentQueue() const { return impl.presentQueue; }
@@ -1641,6 +1647,7 @@ namespace ig
 		NonPixelShading = D3D12_BARRIER_SYNC_NON_PIXEL_SHADING,
 		EmitRaytracingAccelerationStructurePostbuildInfo = D3D12_BARRIER_SYNC_EMIT_RAYTRACING_ACCELERATION_STRUCTURE_POSTBUILD_INFO,
 		ClearUnorderedAccessView = D3D12_BARRIER_SYNC_CLEAR_UNORDERED_ACCESS_VIEW,
+		Clear = D3D12_BARRIER_SYNC_RENDER_TARGET | D3D12_BARRIER_SYNC_DEPTH_STENCIL | D3D12_BARRIER_SYNC_CLEAR_UNORDERED_ACCESS_VIEW,
 		VideoDecode = D3D12_BARRIER_SYNC_VIDEO_DECODE,
 		VideoProcess = D3D12_BARRIER_SYNC_VIDEO_PROCESS,
 		VideoEncode = D3D12_BARRIER_SYNC_VIDEO_ENCODE,
@@ -1651,7 +1658,7 @@ namespace ig
 #ifdef IGLO_VULKAN
 		None = VK_PIPELINE_STAGE_2_NONE,
 		All = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
-		Draw = VK_PIPELINE_STAGE_2_DRAW_INDIRECT_BIT, //TODO: is this correct?
+		Draw = VK_PIPELINE_STAGE_2_ALL_GRAPHICS_BIT,
 		IndexInput = VK_PIPELINE_STAGE_2_INDEX_INPUT_BIT,
 		VertexShading = VK_PIPELINE_STAGE_2_VERTEX_SHADER_BIT,
 		PixelShading = VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
@@ -1661,7 +1668,7 @@ namespace ig
 		Raytracing = VK_PIPELINE_STAGE_2_RAY_TRACING_SHADER_BIT_KHR,
 		Copy = VK_PIPELINE_STAGE_2_COPY_BIT,
 		Resolve = VK_PIPELINE_STAGE_2_RESOLVE_BIT,
-		ExecuteIndirect = VK_PIPELINE_STAGE_2_DRAW_INDIRECT_BIT, //TODO: is this correct?
+		ExecuteIndirect = VK_PIPELINE_STAGE_2_DRAW_INDIRECT_BIT,
 		Predication = VK_PIPELINE_STAGE_2_CONDITIONAL_RENDERING_BIT_EXT,
 		AllShading = VK_PIPELINE_STAGE_2_ALL_GRAPHICS_BIT | VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
 		NonPixelShading = VK_PIPELINE_STAGE_2_VERTEX_SHADER_BIT | VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT |
@@ -1669,6 +1676,7 @@ namespace ig
 		VK_PIPELINE_STAGE_2_GEOMETRY_SHADER_BIT,
 		EmitRaytracingAccelerationStructurePostbuildInfo = VK_PIPELINE_STAGE_2_ACCELERATION_STRUCTURE_BUILD_BIT_KHR,
 		ClearUnorderedAccessView = VK_PIPELINE_STAGE_2_CLEAR_BIT,
+		Clear = VK_PIPELINE_STAGE_2_CLEAR_BIT,
 		VideoDecode = VK_PIPELINE_STAGE_2_VIDEO_DECODE_BIT_KHR,
 		//VideoProcess = ,
 		VideoEncode = VK_PIPELINE_STAGE_2_VIDEO_ENCODE_BIT_KHR,
@@ -1709,13 +1717,18 @@ namespace ig
 		NoAccess = D3D12_BARRIER_ACCESS_NO_ACCESS,
 #endif
 #ifdef IGLO_VULKAN
-		Common = VK_ACCESS_2_NONE,
+		Common = VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT,
 		VertexBuffer = VK_ACCESS_2_VERTEX_ATTRIBUTE_READ_BIT,
 		ConstantBuffer = VK_ACCESS_2_UNIFORM_READ_BIT,
 		IndexBuffer = VK_ACCESS_2_INDEX_READ_BIT,
 		RenderTarget = VK_ACCESS_2_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT,
 		UnorderedAccess = VK_ACCESS_2_SHADER_STORAGE_READ_BIT | VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
-		DepthStencilWrite = VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
+
+		// Depth testing is read-modify-write, and loadOp=LOAD reads the attachment.
+		// Mirrors the RenderTarget mapping (READ|WRITE). D3D12's ACCESS_DEPTH_STENCIL_WRITE
+		// already means read-write depth, so this keeps the portable semantics aligned.
+		DepthStencilWrite = VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_READ_BIT | VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
+
 		DepthStencilRead = VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_READ_BIT,
 		ShaderResource = VK_ACCESS_2_SHADER_READ_BIT,
 		StreamOutput = VK_ACCESS_2_TRANSFORM_FEEDBACK_WRITE_BIT_EXT,
@@ -1917,18 +1930,18 @@ namespace ig
 		void SafePauseRenderPass();
 		void SafeResumeRenderPass();
 
-		// Clears a render texture
+		// Clears mip 0 (all faces) of a render texture. Other mip levels are unaffected.
 		void ClearColor(const Texture& renderTexture, Color color = Colors::Black, uint32_t numRects = 0, const IntRect* rects = nullptr);
-		// Clears a depth buffer
+		// Clears mip 0 (all faces) of a depth buffer. Other mip levels are unaffected.
 		void ClearDepth(const Texture& depthBuffer, float depth = 1.0f, byte stencil = 255, bool clearDepth = true, bool clearStencil = true,
 			uint32_t numRects = 0, const IntRect* rects = nullptr);
 
-		// On D3D12, the buffer must have a UAV.
+		// On D3D12, the buffer is required to have a UAV.
 		// On Vulkan, no descriptors are required.
 		void ClearUnorderedAccessBufferUInt32(const Buffer& buffer, const uint32_t value);
 
-		// Clears mip 0 across all array slices/faces. Other mip levels are unaffected.
-		// On D3D12, the texture must have a UAV.
+		// Clears mip 0 (all faces) of an unordered access texture. Other mip levels are unaffected.
+		// On D3D12, the texture is required to have a UAV.
 		// On Vulkan, no descriptors are required.
 		void ClearUnorderedAccessTextureFloat(const Texture& texture, const float values[4]);
 		void ClearUnorderedAccessTextureUInt32(const Texture& texture, const uint32_t values[4]);
@@ -2456,8 +2469,8 @@ namespace ig
 		// If this returns true, running a GetEvent() loop or MainLoop on the main thread will make the window unresponsive.
 		bool IsInsideModalLoopCallback() const { return insideModalLoopCallback; }
 
-		void SetOnDeviceRemovedCallback(CallbackOnDeviceRemoved callback) { callbackOnDeviceRemoved = callback; }
-		CallbackOnDeviceRemoved GetOnDeviceRemovedCallback() const { return callbackOnDeviceRemoved; }
+		void SetOnDeviceLostCallback(CallbackOnDeviceLost callback) { callbackOnDeviceLost = callback; }
+		CallbackOnDeviceLost GetOnDeviceLostCallback() const { return callbackOnDeviceLost; }
 
 		// Gets the mouse position relative to the topleft corner of the window.
 		IntPoint GetMousePosition() const { return mousePosition; }
@@ -2574,10 +2587,19 @@ namespace ig
 		// NOTE: Changing the backbuffer format requires recreating the swapchain, which is an expensive operation.
 		void SetBackBufferFormat(Format format);
 
-		// Sends a command to the GPU to present the backbuffer to the screen.
-		// This begins a new frame.
-		// The CPU will wait a bit here if the GPU is too far behind.
+		// Presents the backbuffer to the screen.
+		// You are expected to present once in Draw().
 		void Present();
+
+		// Begins a new frame. Must be called at some point after Present().
+		// Note: MainLoop calls this for you, so you don't have to.
+		void MoveToNextFrame();
+
+		// On Vulkan, you must not write to the backbuffer if the swapchain is invalid.
+		// It's a good idea to skip drawing entirely on invalid swapchain.
+		bool IsSwapChainValid() const { return swapChain.isValid; }
+
+		bool IsDeviceLost() const { return deviceLost; }
 
 		// Submits commands to the GPU
 		Receipt Submit(const CommandList& commandList);
@@ -2710,9 +2732,12 @@ namespace ig
 		//------------------ Graphics ------------------//
 
 		Impl_GraphicsContext graphics;
+		bool deviceLost = false;
 
 		struct SwapChainInfo
 		{
+			bool hasPresented = false;
+			bool isValid = false;
 			Extent2D extent;
 			Format format = Format::None;
 			PresentMode presentMode = PresentMode::Vsync;
@@ -2755,9 +2780,8 @@ namespace ig
 		mutable std::unique_ptr<CommandQueue> commandQueue;
 		mutable std::vector<uint32_t> maxMSAAPerFormat; // A cached list of max MSAA values for all iglo formats.
 
-		CallbackOnDeviceRemoved callbackOnDeviceRemoved = nullptr;
+		CallbackOnDeviceLost callbackOnDeviceLost = nullptr;
 
-		void MoveToNextFrame();
 		void FreeAllTempResources();
 
 #ifdef IGLO_D3D12
@@ -2769,10 +2793,14 @@ namespace ig
 		DetailedResult CreateSwapChain(Extent2D extent, Format format, uint32_t numBackBuffers,
 			uint32_t numFramesInFlight, PresentMode presentMode);
 		void DestroySwapChainResources();
+		void PostPresent();
+		void AttemptRepairSwapChain();
 		uint32_t GetCurrentBackBufferIndex() const;
+		bool PollDeviceLost();
+		void NotifyDeviceLost();
 
+		void Impl_Present();
 		uint32_t Impl_GetMaxMultiSampleCount(Format textureFormat) const;
-
 		DetailedResult Impl_InitGraphicsDevice();
 		void Impl_DestroyGraphicsDevice();
 	};

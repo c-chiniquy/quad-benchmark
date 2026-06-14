@@ -159,7 +159,7 @@ namespace ig
 	private:
 		static uint64_t GetElementCount(uint64_t numBooleans, uint32_t sizeOfEachElement);
 
-		static constexpr uint32_t elementSize = 8;
+		static constexpr uint32_t ElementSize = 8;
 		uint64_t booleanCount = 0;
 		std::unique_ptr<uint8_t[]> data;
 	};
@@ -895,6 +895,7 @@ namespace ig
 	uint64_t AlignUp(uint64_t value, uint64_t alignment);
 	bool IsPowerOf2(uint64_t value);
 	float Lerp(float a, float b, float t);
+	double Lerp(double a, double b, double t);
 
 } // namespace ig
 

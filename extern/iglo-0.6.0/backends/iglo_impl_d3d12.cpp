@@ -644,7 +644,7 @@ namespace ig
 		barrier.LayoutBefore = (D3D12_BARRIER_LAYOUT)layoutBefore;
 		barrier.LayoutAfter = (D3D12_BARRIER_LAYOUT)layoutAfter;
 		barrier.Flags = discard ? D3D12_TEXTURE_BARRIER_FLAG_DISCARD : D3D12_TEXTURE_BARRIER_FLAG_NONE;
-		barrier.Subresources.IndexOrFirstMipLevel = 0xffffffff;
+		barrier.Subresources.IndexOrFirstMipLevel = IGLO_UINT32_MAX;
 
 		impl.numTextureBarriers++;
 	}
@@ -1218,7 +1218,7 @@ namespace ig
 		if (createSRV)
 		{
 			impl.srv = heap.AllocatePersistent(DescriptorType::Resource);
-			D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc = GenerateD3D12Desc_SRV(desc.format, desc.msaa, desc.mipLevels, desc.numFaces, desc.isCubemap);
+			D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc = GenerateD3D12Desc_SRV(desc.format, desc.msaa, desc.isCubemap, desc.numFaces);
 			device->CreateShaderResourceView(impl.resource.Get(), &srvDesc, heap.GetD3D12CPUHandle(impl.srv));
 		}
 
@@ -1265,10 +1265,12 @@ namespace ig
 		return impl.resource.Get();
 	}
 
-	D3D12_SHADER_RESOURCE_VIEW_DESC Texture::GenerateD3D12Desc_SRV(Format format, MSAA msaa,
-		uint32_t mipLevels, uint32_t numFaces, bool isCubemap)
+	D3D12_SHADER_RESOURCE_VIEW_DESC Texture::GenerateD3D12Desc_SRV(Format format, MSAA msaa, bool isCubemap, uint32_t numFaces,
+		uint32_t baseMip, uint32_t mipLevels)
 	{
 		assert((!isCubemap || numFaces % 6 == 0) && "If cubemap, numFaces must be a multiple of 6");
+		assert((!isCubemap || msaa == MSAA::Disabled) && "No multisampled cube SRV dimension exists");
+		assert((msaa == MSAA::Disabled || baseMip == 0) && "MSAA SRVs are single-mip");
 
 		D3D12_SHADER_RESOURCE_VIEW_DESC out = {};
 		out.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
@@ -1282,12 +1284,14 @@ namespace ig
 				{
 					out.ViewDimension = D3D12_SRV_DIMENSION_TEXTURECUBE;
 					out.TextureCube.MipLevels = mipLevels;
+					out.TextureCube.MostDetailedMip = baseMip;
 				}
 				else
 				{
 					out.ViewDimension = D3D12_SRV_DIMENSION_TEXTURECUBEARRAY;
 					out.TextureCubeArray.MipLevels = mipLevels;
 					out.TextureCubeArray.NumCubes = numFaces / 6;
+					out.TextureCubeArray.MostDetailedMip = baseMip;
 				}
 			}
 			else
@@ -1296,12 +1300,14 @@ namespace ig
 				{
 					out.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
 					out.Texture2D.MipLevels = mipLevels;
+					out.Texture2D.MostDetailedMip = baseMip;
 				}
 				else
 				{
 					out.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2DARRAY;
 					out.Texture2DArray.MipLevels = mipLevels;
 					out.Texture2DArray.ArraySize = numFaces;
+					out.Texture2DArray.MostDetailedMip = baseMip;
 				}
 			}
 		}
@@ -1329,8 +1335,10 @@ namespace ig
 		return out;
 	}
 
-	D3D12_UNORDERED_ACCESS_VIEW_DESC Texture::GenerateD3D12Desc_UAV(Format format, MSAA msaa, uint32_t numFaces)
+	D3D12_UNORDERED_ACCESS_VIEW_DESC Texture::GenerateD3D12Desc_UAV(Format format, MSAA msaa, uint32_t numFaces, uint32_t mipIndex)
 	{
+		assert((msaa == MSAA::Disabled || mipIndex == 0) && "MSAA UAVs are mip 0 only");
+
 		D3D12_UNORDERED_ACCESS_VIEW_DESC out = {};
 		out.Format = GetFormatInfoDXGI(format).dxgiFormat;
 
@@ -1341,7 +1349,7 @@ namespace ig
 			{
 				out.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2DARRAY;
 				out.Texture2DArray.ArraySize = numFaces;
-				out.Texture2DArray.MipSlice = 0;
+				out.Texture2DArray.MipSlice = mipIndex;
 				out.Texture2DArray.FirstArraySlice = 0;
 			}
 			else
@@ -1356,7 +1364,7 @@ namespace ig
 			if (msaa == MSAA::Disabled)
 			{
 				out.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D;
-				out.Texture2D.MipSlice = 0;
+				out.Texture2D.MipSlice = mipIndex;
 			}
 			else
 			{
@@ -1367,8 +1375,10 @@ namespace ig
 		return out;
 	}
 
-	D3D12_RENDER_TARGET_VIEW_DESC Texture::GenerateD3D12Desc_RTV(Format format, MSAA msaa, uint32_t numFaces)
+	D3D12_RENDER_TARGET_VIEW_DESC Texture::GenerateD3D12Desc_RTV(Format format, MSAA msaa, uint32_t numFaces, uint32_t mipIndex)
 	{
+		assert((msaa == MSAA::Disabled || mipIndex == 0) && "MSAA RTVs are mip 0 only");
+
 		D3D12_RENDER_TARGET_VIEW_DESC out = {};
 		out.Format = GetFormatInfoDXGI(format).dxgiFormat;
 
@@ -1379,7 +1389,7 @@ namespace ig
 			{
 				out.ViewDimension = D3D12_RTV_DIMENSION_TEXTURE2DARRAY;
 				out.Texture2DArray.ArraySize = numFaces;
-				out.Texture2DArray.MipSlice = 0;
+				out.Texture2DArray.MipSlice = mipIndex;
 				out.Texture2DArray.FirstArraySlice = 0;
 				out.Texture2DArray.PlaneSlice = 0;
 			}
@@ -1395,7 +1405,7 @@ namespace ig
 			if (msaa == MSAA::Disabled)
 			{
 				out.ViewDimension = D3D12_RTV_DIMENSION_TEXTURE2D;
-				out.Texture2D.MipSlice = 0;
+				out.Texture2D.MipSlice = mipIndex;
 				out.Texture2D.PlaneSlice = 0;
 			}
 			else
@@ -1407,8 +1417,10 @@ namespace ig
 		return out;
 	}
 
-	D3D12_DEPTH_STENCIL_VIEW_DESC Texture::GenerateD3D12Desc_DSV(Format format, MSAA msaa, uint32_t numFaces)
+	D3D12_DEPTH_STENCIL_VIEW_DESC Texture::GenerateD3D12Desc_DSV(Format format, MSAA msaa, uint32_t numFaces, uint32_t mipIndex)
 	{
+		assert((msaa == MSAA::Disabled || mipIndex == 0) && "MSAA DSVs are mip 0 only");
+
 		D3D12_DEPTH_STENCIL_VIEW_DESC out = {};
 		out.Format = GetFormatInfoDXGI(format).dxgiFormat;
 		out.Flags = D3D12_DSV_FLAG_NONE;
@@ -1420,7 +1432,7 @@ namespace ig
 			{
 				out.ViewDimension = D3D12_DSV_DIMENSION_TEXTURE2DARRAY;
 				out.Texture2DArray.ArraySize = numFaces;
-				out.Texture2DArray.MipSlice = 0;
+				out.Texture2DArray.MipSlice = mipIndex;
 				out.Texture2DArray.FirstArraySlice = 0;
 			}
 			else
@@ -1435,7 +1447,7 @@ namespace ig
 			if (msaa == MSAA::Disabled)
 			{
 				out.ViewDimension = D3D12_DSV_DIMENSION_TEXTURE2D;
-				out.Texture2D.MipSlice = 0;
+				out.Texture2D.MipSlice = mipIndex;
 			}
 			else
 			{
@@ -1821,6 +1833,8 @@ namespace ig
 		impl.heap_DSV = nullptr;
 
 		impl.heap_Reusable_UAV = nullptr;
+		impl.heap_Reusable_RTV = nullptr;
+		impl.heap_Reusable_DSV = nullptr;
 	}
 
 	DetailedResult DescriptorHeap::Impl_Create()
@@ -1867,18 +1881,20 @@ namespace ig
 
 		// Shader-visible descriptor heaps
 		{
-			// Resources
-			D3D12_DESCRIPTOR_HEAP_DESC resHeap = {};
-			resHeap.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
-			resHeap.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
-			resHeap.NumDescriptors = CalcTotalDescriptors(limits.persistentResources, limits.tempResourcesPerFrame, maxFramesInFlight);
-			HRESULT hrRes = device->CreateDescriptorHeap(&resHeap, IID_PPV_ARGS(&impl.heap_CBV_SRV_UAV));
+			D3D12_DESCRIPTOR_HEAP_DESC resourceHeap =
+			{
+				.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV,
+				.NumDescriptors = CalcTotalDescriptors(limits.persistentResources, limits.tempResourcesPerFrame, maxFramesInFlight),
+				.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE,
+			};
+			D3D12_DESCRIPTOR_HEAP_DESC samplerHeap =
+			{
+				.Type = D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER,
+				.NumDescriptors = limits.samplers,
+				.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE,
+			};
 
-			// Samplers
-			D3D12_DESCRIPTOR_HEAP_DESC samplerHeap = {};
-			samplerHeap.Type = D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER;
-			samplerHeap.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
-			samplerHeap.NumDescriptors = limits.samplers;
+			HRESULT hrRes = device->CreateDescriptorHeap(&resourceHeap, IID_PPV_ARGS(&impl.heap_CBV_SRV_UAV));
 			HRESULT hrSampler = device->CreateDescriptorHeap(&samplerHeap, IID_PPV_ARGS(&impl.heap_Samplers));
 
 			if (FAILED(hrRes) || FAILED(hrSampler))
@@ -1889,13 +1905,16 @@ namespace ig
 
 		// Non-shader-visible descriptor heaps
 		{
-			D3D12_DESCRIPTOR_HEAP_DESC rtvDesc = {};
-			rtvDesc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_RTV;
-			rtvDesc.NumDescriptors = limits.renderTextures;
-
-			D3D12_DESCRIPTOR_HEAP_DESC dsvDesc = {};
-			dsvDesc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_DSV;
-			dsvDesc.NumDescriptors = limits.depthBuffers;
+			D3D12_DESCRIPTOR_HEAP_DESC rtvDesc =
+			{
+				.Type = D3D12_DESCRIPTOR_HEAP_TYPE_RTV,
+				.NumDescriptors = limits.renderTextures,
+			};
+			D3D12_DESCRIPTOR_HEAP_DESC dsvDesc =
+			{
+				.Type = D3D12_DESCRIPTOR_HEAP_TYPE_DSV,
+				.NumDescriptors = limits.depthBuffers,
+			};
 
 			HRESULT hrRTV = device->CreateDescriptorHeap(&rtvDesc, IID_PPV_ARGS(&impl.heap_RTV));
 			HRESULT hrDSV = device->CreateDescriptorHeap(&dsvDesc, IID_PPV_ARGS(&impl.heap_DSV));
@@ -1908,13 +1927,27 @@ namespace ig
 
 		// Reusable non-shader-visible descriptor heaps
 		{
-			D3D12_DESCRIPTOR_HEAP_DESC uavDesc = {};
-			uavDesc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV; // We just need the UAV
-			uavDesc.NumDescriptors = 1;
+			D3D12_DESCRIPTOR_HEAP_DESC uavDesc =
+			{
+				.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV, // We just need the UAV
+				.NumDescriptors = 1,
+			};
+			D3D12_DESCRIPTOR_HEAP_DESC rtvDesc =
+			{
+				.Type = D3D12_DESCRIPTOR_HEAP_TYPE_RTV,
+				.NumDescriptors = MAX_SIMULTANEOUS_RENDER_TARGETS,
+			};
+			D3D12_DESCRIPTOR_HEAP_DESC dsvDesc =
+			{
+				.Type = D3D12_DESCRIPTOR_HEAP_TYPE_DSV,
+				.NumDescriptors = 1,
+			};
 
 			HRESULT hrUAV = device->CreateDescriptorHeap(&uavDesc, IID_PPV_ARGS(&impl.heap_Reusable_UAV));
+			HRESULT hrRTV = device->CreateDescriptorHeap(&rtvDesc, IID_PPV_ARGS(&impl.heap_Reusable_RTV));
+			HRESULT hrDSV = device->CreateDescriptorHeap(&dsvDesc, IID_PPV_ARGS(&impl.heap_Reusable_DSV));
 
-			if (FAILED(hrUAV))
+			if (FAILED(hrUAV) || FAILED(hrRTV) || FAILED(hrDSV))
 			{
 				return DetailedResult::Fail("Failed to create reusable descriptor heaps.");
 			}
@@ -1947,6 +1980,14 @@ namespace ig
 	D3D12_CPU_DESCRIPTOR_HANDLE DescriptorHeap::GetD3D12CPUHandle_Reusable_UAV() const
 	{
 		return impl.heap_Reusable_UAV->GetCPUDescriptorHandleForHeapStart();
+	}
+	D3D12_CPU_DESCRIPTOR_HANDLE DescriptorHeap::GetD3D12CPUHandle_Reusable_RTV() const
+	{
+		return impl.heap_Reusable_RTV->GetCPUDescriptorHandleForHeapStart();
+	}
+	D3D12_CPU_DESCRIPTOR_HANDLE DescriptorHeap::GetD3D12CPUHandle_Reusable_DSV() const
+	{
+		return impl.heap_Reusable_DSV->GetCPUDescriptorHandleForHeapStart();
 	}
 
 	ID3D12DescriptorHeap* DescriptorHeap::GetD3D12DescriptorHeap(DescriptorType type) const
@@ -2024,6 +2065,58 @@ namespace ig
 	{
 		// D3D12 allows changing present modes dynamically without recreating the swapchain.
 		swapChain.presentMode = presentMode;
+	}
+
+	void IGLOContext::Impl_Present()
+	{
+		HRESULT hr = 0;
+		switch (swapChain.presentMode)
+		{
+		case PresentMode::Immediate:
+			hr = graphics.swapChain->Present(0, DXGI_PRESENT_ALLOW_TEARING);
+			break;
+		case PresentMode::Mailbox:
+			hr = graphics.swapChain->Present(0, 0);
+			break;
+		case PresentMode::Vsync:
+			hr = graphics.swapChain->Present(1, 0);
+			break;
+		case PresentMode::VsyncHalf:
+			hr = graphics.swapChain->Present(2, 0);
+			break;
+		default:
+			Log(LogType::Error, "Presentation failed. Reason: Invalid present mode.");
+			break;
+		}
+		if (FAILED(hr))
+		{
+			Log(LogType::Error, D3D12ErrorMsg("IDXGISwapChain::Present", hr));
+		}
+	}
+
+	bool IGLOContext::PollDeviceLost()
+	{
+		HRESULT hr = graphics.device->GetDeviceRemovedReason();
+		if (FAILED(hr)) return true;
+		return false;
+	}
+
+	void IGLOContext::PostPresent()
+	{
+		// Wait until the swap chain is ready to present the next frame.
+		// This ensures that the value passed to SetMaximumFrameLatency() is respected.
+		// Waiting for this at the start of the next frame reduces input latency.
+		// Info:
+		// https://learn.microsoft.com/en-us/windows/uwp/gaming/reduce-latency-with-dxgi-1-3-swap-chains
+		// https://www.intel.com/content/www/us/en/developer/articles/code-sample/sample-application-for-direct3d-12-flip-model-swap-chains.html
+		HANDLE swapchainWaitableObject = graphics.swapChain->GetFrameLatencyWaitableObject();
+		WaitForSingleObjectEx(swapchainWaitableObject, 1000, true);
+	}
+
+	void IGLOContext::AttemptRepairSwapChain()
+	{
+		// "Repairing" a swapchain in D3D12 by simply recreating it is futile.
+		// If swapchain failed to create, the solution is for user to stop using invalid settings.
 	}
 
 	void IGLOContext::DestroySwapChainResources()
@@ -2144,6 +2237,7 @@ namespace ig
 			}
 		}
 
+		swapChain.isValid = true;
 		return DetailedResult::Success();
 	}
 
@@ -2165,6 +2259,8 @@ namespace ig
 
 		WaitForIdleDevice();
 
+		swapChain.hasPresented = false;
+		swapChain.isValid = false;
 		window.activeResizing = false;
 		window.activeMenuLoop = false;
 
@@ -2234,6 +2330,8 @@ namespace ig
 				swapChain.wrapped_sRGB_opposite.push_back(std::move(Texture::CreateWrapped(*this, desc, impl)));
 			}
 		}
+
+		swapChain.isValid = true;
 
 		commandQueue->SubmitSignal(CommandListType::Graphics);
 		WaitForIdleDevice();
