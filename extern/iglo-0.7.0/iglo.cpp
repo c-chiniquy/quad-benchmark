@@ -1,6 +1,7 @@
 ﻿
 #include "iglo.h"
-#include "shaders/CS_GenerateMipmaps.h"
+#include "shaders/CS_GenerateMips_Pow2.h"
+#include "shaders/CS_GenerateMips_NonPow2.h"
 
 #define STBI_WINDOWS_UTF8
 #define STB_IMAGE_IMPLEMENTATION
@@ -1025,11 +1026,24 @@ namespace ig
 #endif
 			break;
 
-		case SimpleBarrier::ClearInactiveRenderTarget:
+		case SimpleBarrier::ClearInactiveRenderTexture:
 #ifdef IGLO_D3D12
 			out.sync = BarrierSync::RenderTarget;
 			out.access = BarrierAccess::RenderTarget;
 			out.layout = BarrierLayout::RenderTarget;
+#endif
+#ifdef IGLO_VULKAN
+			out.sync = BarrierSync::Clear;
+			out.access = BarrierAccess::CopyDest;
+			out.layout = BarrierLayout::CopyDest;
+#endif
+			break;
+
+		case SimpleBarrier::ClearInactiveDepthBuffer:
+#ifdef IGLO_D3D12
+			out.sync = BarrierSync::DepthStencil;
+			out.access = BarrierAccess::DepthStencilWrite;
+			out.layout = BarrierLayout::DepthStencilWrite;
 #endif
 #ifdef IGLO_VULKAN
 			out.sync = BarrierSync::Clear;
@@ -1203,8 +1217,15 @@ namespace ig
 
 		if (destination.GetUsage() == TextureUsage::Readable)
 		{
-			Log(LogType::Error, "Failed to issue a copy texture subresource command."
-				" Reason: The ability to copy a texture subresource to a readable texture subresource is not yet implemented.");
+			// Destination must be a single subresource sized to the source mip being copied.
+			assert(destination.GetMSAA() == MSAA::Disabled && "Readable dest must not be multisampled");
+			assert(destination.GetMipLevels() == 1 && destination.GetNumFaces() == 1 && "Readable dest must be 1 mip and 1 face");
+			assert(destFaceIndex == 0 && destMipIndex == 0 && "Readable dest face and mip index must be 0");
+			assert(destination.GetFormat() == source.GetFormat() && "format mismatch");
+			assert(destination.GetExtent() == Image::CalculateMipExtent(source.GetExtent(), sourceMipIndex) &&
+				"Readable dest extent must match source mip extent");
+
+			Impl_CopyTextureSubresourceToReadableTexture(source, sourceFaceIndex, sourceMipIndex, destination);
 			return;
 		}
 
@@ -1216,7 +1237,7 @@ namespace ig
 		assert(
 			source.GetUsage() != TextureUsage::Readable &&
 			destination.GetUsage() == TextureUsage::Readable &&
-			"dest must be Readable, source must be non-readable");
+			"source must not be Readable, dest must be Readable");
 
 		Impl_CopyTextureToReadableTexture(source, destination);
 	}
@@ -1710,8 +1731,9 @@ namespace ig
 
 		endOfFrame.clear();
 
-		genMipsPipeline = nullptr;
-		bilinearClampSampler = nullptr;
+		pipeline_genMips_pow2 = nullptr;
+		pipeline_genMips_nonPow2 = nullptr;
+		sampler_bilinearClamp = nullptr;
 
 		DestroySwapChainResources();
 
@@ -1790,12 +1812,13 @@ namespace ig
 			if (!result) return result;
 		}
 
-		// Mipmap gen compute pipeline
+		// Mip gen compute pipelines
 		{
-			genMipsPipeline = Pipeline::CreateCompute(*this, Shader(g_CS_GenerateMipmaps, sizeof(g_CS_GenerateMipmaps), "CSMain"));
-			if (!genMipsPipeline)
+			pipeline_genMips_pow2 = Pipeline::CreateCompute(*this, Shader(g_CS_GenerateMips_Pow2, sizeof(g_CS_GenerateMips_Pow2), "CSMain"));
+			pipeline_genMips_nonPow2 = Pipeline::CreateCompute(*this, Shader(g_CS_GenerateMips_NonPow2, sizeof(g_CS_GenerateMips_NonPow2), "CSMain"));
+			if (!pipeline_genMips_pow2 || !pipeline_genMips_nonPow2)
 			{
-				Log(LogType::Warning, "Failed to create mipmap generation compute pipeline.");
+				Log(LogType::Warning, "Failed to create mip gen compute pipelines.");
 			}
 
 			SamplerDesc samplerDesc;
@@ -1804,10 +1827,10 @@ namespace ig
 			samplerDesc.wrapV = TextureWrapMode::Clamp;
 			samplerDesc.wrapW = TextureWrapMode::Clamp;
 
-			bilinearClampSampler = Sampler::Create(*this, samplerDesc);
-			if (!bilinearClampSampler)
+			sampler_bilinearClamp = Sampler::Create(*this, samplerDesc);
+			if (!sampler_bilinearClamp)
 			{
-				Log(LogType::Warning, "Failed to create mipmap generation sampler.");
+				Log(LogType::Warning, "Failed to create mip gen sampler.");
 			}
 		}
 
@@ -2048,11 +2071,11 @@ namespace ig
 		return numLevels;
 	}
 
-	void* Image::GetMipPixels(uint32_t faceIndex, uint32_t mipIndex) const
+	void* Image::GetPixelsAtSubresource(uint32_t faceIndex, uint32_t mipIndex) const
 	{
 		if (faceIndex >= desc.numFaces || mipIndex >= desc.mipLevels)
 		{
-			Fatal("Out of bounds Image::GetMipPixels");
+			Fatal("Out of bounds Image::GetPixelsAtSubresource");
 		}
 		byte* out = pixelsPtr;
 		out += faceIndex * CalculateTotalSize(desc.extent, desc.format, desc.mipLevels, 1);
@@ -2285,7 +2308,7 @@ namespace ig
 			}
 		}
 
-		// If mipmaps exist
+		// If mips exist
 		if ((header->sCaps.dwCaps1 & DDSCAPS_MIPMAP) && (header->dwMipMapCount > 1))
 		{
 			tempDesc.mipLevels = header->dwMipMapCount;
@@ -3240,6 +3263,11 @@ namespace ig
 			Log(LogType::Error, ToString(errStr, "MSAA is not supported for unordered access textures."));
 			return nullptr;
 		}
+		if (desc.msaa != MSAA::Disabled && desc.usage == TextureUsage::Readable)
+		{
+			Log(LogType::Error, ToString(errStr, "MSAA is not supported for Readable textures."));
+			return nullptr;
+		}
 		if (HasFlag(desc.flags, TextureFlags::DepthBuffer_DenyShaderResource) && desc.usage != TextureUsage::DepthBuffer)
 		{
 			Log(LogType::Error, ToString(errStr, "DepthBuffer_DenyShaderResource flag requires DepthBuffer usage."));
@@ -3274,7 +3302,7 @@ namespace ig
 	}
 
 	std::unique_ptr<Texture> Texture::LoadFromFile(const IGLOContext& context, CommandList& cmd,
-		const std::string& filename, bool generateMipmaps, bool sRGB)
+		const std::string& filename, bool generateMips, bool sRGB)
 	{
 		ReadFileResult file = ReadFile(filename);
 		if (!file.success)
@@ -3287,11 +3315,11 @@ namespace ig
 			Log(LogType::Error, "Failed to load texture from file. Reason: File '" + filename + "' is empty.");
 			return nullptr;
 		}
-		return LoadFromMemory(context, cmd, file.fileContent.data(), file.fileContent.size(), generateMipmaps, sRGB);
+		return LoadFromMemory(context, cmd, file.fileContent.data(), file.fileContent.size(), generateMips, sRGB);
 	}
 
 	std::unique_ptr<Texture> Texture::LoadFromMemory(const IGLOContext& context, CommandList& cmd,
-		const byte* fileData, size_t numBytes, bool generateMipmaps, bool sRGB)
+		const byte* fileData, size_t numBytes, bool generateMips, bool sRGB)
 	{
 		std::unique_ptr<Image> image = Image::LoadFromMemory(fileData, numBytes, false);
 		if (!image) return nullptr;
@@ -3304,25 +3332,23 @@ namespace ig
 					" because no sRGB equivalent was found for this iglo format: ", GetFormatName(image->GetFormat())));
 			}
 		}
-		return LoadFromMemory(context, cmd, *image, generateMipmaps);
+		return LoadFromMemory(context, cmd, *image, generateMips);
 	}
 
 	std::unique_ptr<Texture> Texture::LoadFromMemory(const IGLOContext& context, CommandList& cmd,
-		const Image& image, bool generateMipmaps)
+		const Image& image, bool generateMips)
 	{
 		const char* errStr = "Failed to create texture from image. Reason: ";
 
-		// Should we generate mips?
-		uint32_t fullMipLevels = Image::CalculateNumMips(image.GetExtent());
-		bool proceedWithMipGen = generateMipmaps && (fullMipLevels > 1) && (image.GetMipLevels() == 1);
+		bool proceedWithMipGen = generateMips;
 
-		// Can we generate mips?
-		if (proceedWithMipGen)
+		if (generateMips)
 		{
+			// Can we generate mips?
 			DetailedResult result = ValidateMipGeneration(cmd.GetCommandListType(), image);
 			if (!result)
 			{
-				Log(LogType::Warning, "Unable to generate mipmaps for texture. Reason: " + result.errorMessage);
+				Log(LogType::Warning, "Unable to generate mips for texture. Reason: " + result.errorMessage);
 				proceedWithMipGen = false;
 			}
 		}
@@ -3334,7 +3360,7 @@ namespace ig
 		selfDesc.msaa = MSAA::Disabled;
 		selfDesc.isCubemap = image.IsCubemap();
 		selfDesc.numFaces = image.GetNumFaces();
-		selfDesc.mipLevels = proceedWithMipGen ? fullMipLevels : image.GetMipLevels();
+		selfDesc.mipLevels = proceedWithMipGen ? Image::CalculateNumMips(image.GetExtent()) : image.GetMipLevels();
 
 		std::unique_ptr<Texture> out = Create(context, selfDesc);
 		if (!out)
@@ -3376,21 +3402,25 @@ namespace ig
 
 	DetailedResult Texture::ValidateMipGeneration(CommandListType cmdListType, const Image& image)
 	{
-		if (GetFormatInfo(image.GetFormat()).blockSize != 0)
+		if (image.GetDesc().mipLevels > 1)
 		{
-			return DetailedResult::Fail("Mipmap generation is not supported for block compression formats.");
+			return DetailedResult::Fail("Source texture must contain exactly 1 mip level.");
+		}
+		else if (Image::CalculateNumMips(image.GetExtent()) <= 1)
+		{
+			return DetailedResult::Fail("Source texture is too small to fit any additional mips.");
+		}
+		else if (GetFormatInfo(image.GetFormat()).blockSize != 0)
+		{
+			return DetailedResult::Fail("Mip generation is not supported for block compression formats.");
 		}
 		else if (image.GetNumFaces() > 1)
 		{
-			return DetailedResult::Fail("Mipmap generation is not yet supported for cube maps and texture arrays.");
-		}
-		else if (!IsPowerOf2(image.GetWidth()) || !IsPowerOf2(image.GetHeight()))
-		{
-			return DetailedResult::Fail("Mipmap generation is not yet supported for non power of 2 textures.");
+			return DetailedResult::Fail("Mip generation is not yet supported for cube maps and texture arrays.");
 		}
 		else if (cmdListType == CommandListType::Copy)
 		{
-			return DetailedResult::Fail("Mipmap generation can't be performed with a 'Copy' command list type.");
+			return DetailedResult::Fail("Mip generation can't be performed with a 'Copy' command list type.");
 		}
 
 		return DetailedResult::Success();
@@ -3398,8 +3428,8 @@ namespace ig
 
 	DetailedResult Texture::GenerateMips(CommandList& cmd, const Image& image)
 	{
-		assert(desc.mipLevels > 1);
-		assert(image.GetExtent() == desc.extent);
+		if (desc.mipLevels <= 1) Fatal("Unexpected mip gen params");
+		if (image.GetExtent() != desc.extent) Fatal("Unexpected mip gen params");
 
 		Extent2D nextMipExtent = Image::CalculateMipExtent(desc.extent, 1);
 		FormatInfo formatInfo = GetFormatInfo(desc.format);
@@ -3418,7 +3448,7 @@ namespace ig
 		std::unique_ptr<Texture> unorderedTexture = Texture::Create(context, unorderedDesc);
 		if (!unorderedTexture)
 		{
-			return DetailedResult::Fail("Failed to create unordered access texture for mipmap generation.");
+			return DetailedResult::Fail("Failed to create unordered access texture for mip generation.");
 		}
 		const Texture& unorderedRef = *unorderedTexture;
 		context.DelayedDestroyTexture(std::move(unorderedTexture));
@@ -3426,32 +3456,33 @@ namespace ig
 		cmd.AddTextureBarrierAtSubresource(*this, SimpleBarrier::Discard, SimpleBarrier::CopyDest, 0, 0);
 		cmd.FlushBarriers();
 
-		// Upload the first and largest mipmap to this texture
+		// Upload the first and largest mip to this texture
 		SetPixelsAtSubresource(cmd, image, 0, 0);
 
-		struct MipmapGenPushConstants
+		const bool isPow2 = IsPowerOf2(desc.extent.width) && IsPowerOf2(desc.extent.height);
+		const uint32_t lastMip = desc.mipLevels - 1;
+		for (uint32_t i = 0; i < lastMip;)
 		{
-			uint32_t srcTextureIndex = IGLO_UINT32_MAX;
-			uint32_t destTextureIndex = IGLO_UINT32_MAX;
-			uint32_t bilinearClampSamplerIndex = IGLO_UINT32_MAX;
-			uint32_t is_sRGB = 0;
-			Vector2 inverseDestTextureSize;
-		};
-		MipmapGenPushConstants pushConstants;
-		pushConstants.bilinearClampSamplerIndex = context.GetBilinearClampSamplerDescriptor().heapIndex;
-		pushConstants.is_sRGB = formatInfo.is_sRGB;
+			const uint32_t remainingMipsToGenerate = lastMip - i;
+			const uint32_t numMips = isPow2 ? std::min(remainingMipsToGenerate, 4u) : 1;
+			assert(numMips >= 1 && numMips <= 4);
 
-		for (uint32_t i = 0; i < desc.mipLevels - 1; i++)
-		{
 			DescriptorHeap& heap = context.GetDescriptorHeap();
 
 			Descriptor srv = heap.AllocateTempResource();
-			Descriptor uav = heap.AllocateTempResource();
-			pushConstants.srcTextureIndex = srv.heapIndex;
-			pushConstants.destTextureIndex = uav.heapIndex;
+			const uint32_t srcTextureIndex = srv.heapIndex;
 
-			Extent2D destDimensions = Image::CalculateMipExtent(image.GetExtent(), i + 1);
-			pushConstants.inverseDestTextureSize = Vector2(1.0f / (float)destDimensions.width, 1.0f / (float)destDimensions.height);
+			Descriptor uav[4] = {};
+			uint32_t destIndex[4] = { IGLO_UINT32_MAX, IGLO_UINT32_MAX, IGLO_UINT32_MAX, IGLO_UINT32_MAX };
+			for (uint32_t m = 0; m < numMips; m++)
+			{
+				uav[m] = heap.AllocateTempResource();
+				destIndex[m] = uav[m].heapIndex;
+			}
+
+			const Extent2D srcExtent = image.GetMipExtent(i);
+			const Extent2D destExtent = image.GetMipExtent(i + 1);
+			const Vector2 inverseDestTextureSize = Vector2(1.0f / (float)destExtent.width, 1.0f / (float)destExtent.height);
 
 #ifdef IGLO_D3D12
 			auto device = context.GetD3D12Device();
@@ -3469,8 +3500,11 @@ namespace ig
 			D3D12_UNORDERED_ACCESS_VIEW_DESC uavDesc = {};
 			uavDesc.Format = GetFormatInfoDXGI(format_non_sRGB).dxgiFormat;
 			uavDesc.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D;
-			uavDesc.Texture2D.MipSlice = i;
-			device->CreateUnorderedAccessView(unorderedRef.GetD3D12Resource(), nullptr, &uavDesc, heap.GetD3D12CPUHandle(uav));
+			for (uint32_t m = 0; m < numMips; m++)
+			{
+				uavDesc.Texture2D.MipSlice = i + m;
+				device->CreateUnorderedAccessView(unorderedRef.GetD3D12Resource(), nullptr, &uavDesc, heap.GetD3D12CPUHandle(uav[m]));
+			}
 #endif
 #ifdef IGLO_VULKAN
 			VkDevice device = context.GetVulkanDevice();
@@ -3483,43 +3517,123 @@ namespace ig
 				image.GetFormat(), false, numFaces, baseMip, mipLevels);
 			if (!view_srv)
 			{
-				return DetailedResult::Fail("Failed to create source image view for mipmap generation.");
+				return DetailedResult::Fail("Failed to create source image view for mip generation.");
 			}
 			heap.WriteImageDescriptor(srv, VulkanDescriptorType::Texture_SRV, view_srv, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
 			context.DelayedDestroyVulkanImageView(view_srv);
 
 			// UAV
-			VkImageView view_uav = Texture::CreateImageView(device, unorderedRef.GetVulkanImage(), VK_IMAGE_ASPECT_COLOR_BIT,
-				format_non_sRGB, false, numFaces, baseMip, mipLevels);
-			if (!view_uav)
+			for (uint32_t m = 0; m < numMips; m++)
 			{
-				return DetailedResult::Fail("Failed to create destination image view for mipmap generation.");
+				VkImageView view_uav = Texture::CreateImageView(device, unorderedRef.GetVulkanImage(), VK_IMAGE_ASPECT_COLOR_BIT,
+					format_non_sRGB, false, numFaces, baseMip + m, mipLevels);
+				if (!view_uav)
+				{
+					return DetailedResult::Fail("Failed to create destination image view for mip generation.");
+				}
+				heap.WriteImageDescriptor(uav[m], VulkanDescriptorType::Texture_UAV, view_uav, VK_IMAGE_LAYOUT_GENERAL);
+				context.DelayedDestroyVulkanImageView(view_uav);
 			}
-			heap.WriteImageDescriptor(uav, VulkanDescriptorType::Texture_UAV, view_uav, VK_IMAGE_LAYOUT_GENERAL);
-			context.DelayedDestroyVulkanImageView(view_uav);
 #endif
 
 			cmd.AddTextureBarrierAtSubresource(*this, SimpleBarrier::CopyDest, SimpleBarrier::ComputeShaderResource, 0, i);
-			cmd.AddTextureBarrierAtSubresource(unorderedRef, SimpleBarrier::Discard, SimpleBarrier::ComputeShaderUnorderedAccess, 0, i);
+			for (uint32_t m = 0; m < numMips; m++)
+			{
+				cmd.AddTextureBarrierAtSubresource(unorderedRef, SimpleBarrier::Discard, SimpleBarrier::ComputeShaderUnorderedAccess, 0, i + m);
+			}
 			cmd.FlushBarriers();
 
-			cmd.SetPipeline(context.GetMipmapGenerationPipeline());
-			cmd.SetComputePushConstants(&pushConstants, sizeof(pushConstants));
-			cmd.DispatchCompute(
-				std::max(destDimensions.width / 8, 1U),
-				std::max(destDimensions.height / 8, 1U),
-				1);
+			if (isPow2)
+			{
+				cmd.SetPipeline(context.GetPipeline_GenerateMips_Pow2());
+				struct PushConstants_Pow2
+				{
+					Vector2 inverseDestTextureSize;
+					Extent2D destTextureSize;
+					uint32_t numMips = 0;
+					uint32_t is_sRGB = 0;
+					uint32_t bilinearClampSamplerIndex = IGLO_UINT32_MAX;
+					uint32_t srcTextureIndex = IGLO_UINT32_MAX;
+					uint32_t destTextureIndex0 = IGLO_UINT32_MAX;
+					uint32_t destTextureIndex1 = IGLO_UINT32_MAX;
+					uint32_t destTextureIndex2 = IGLO_UINT32_MAX;
+					uint32_t destTextureIndex3 = IGLO_UINT32_MAX;
+				}
+				p =
+				{
+					.inverseDestTextureSize = inverseDestTextureSize,
+					.destTextureSize = destExtent,
+					.numMips = numMips,
+					.is_sRGB = formatInfo.is_sRGB,
+					.bilinearClampSamplerIndex = context.GetSampler_BilinearClamp().heapIndex,
+					.srcTextureIndex = srcTextureIndex,
+					.destTextureIndex0 = destIndex[0],
+					.destTextureIndex1 = destIndex[1],
+					.destTextureIndex2 = destIndex[2],
+					.destTextureIndex3 = destIndex[3],
+				};
+				cmd.SetComputePushConstants(&p, sizeof(p));
+				cmd.DispatchCompute(
+					std::max(destExtent.width / 8, 1u),
+					std::max(destExtent.height / 8, 1u),
+					1);
+			}
+			else
+			{
+				cmd.SetPipeline(context.GetPipeline_GenerateMips_NonPow2());
+				struct PushConstants_NonPow2
+				{
+					Extent2D srcTextureSize;
+					Extent2D destTextureSize;
+					uint32_t is_sRGB = 0;
+					uint32_t bilinearClampSamplerIndex = IGLO_UINT32_MAX;
+					uint32_t srcTextureIndex = IGLO_UINT32_MAX;
+					uint32_t destTextureIndex = IGLO_UINT32_MAX;
+				}
+				p =
+				{
+					.srcTextureSize = srcExtent,
+					.destTextureSize = destExtent,
+					.is_sRGB = formatInfo.is_sRGB,
+					.bilinearClampSamplerIndex = context.GetSampler_BilinearClamp().heapIndex,
+					.srcTextureIndex = srcTextureIndex,
+					.destTextureIndex = destIndex[0],
+				};
+				cmd.SetComputePushConstants(&p, sizeof(p));
+				cmd.DispatchCompute(
+					std::max((destExtent.width + 7) / 8, 1u),
+					std::max((destExtent.height + 7) / 8, 1u),
+					1);
+			}
 
 			cmd.AddTextureBarrierAtSubresource(*this, SimpleBarrier::ComputeShaderResource, SimpleBarrier::PixelShaderResource, 0, i);
-			cmd.AddTextureBarrierAtSubresource(*this, SimpleBarrier::Discard, SimpleBarrier::CopyDest, 0, i + 1);
-			cmd.AddTextureBarrierAtSubresource(unorderedRef, SimpleBarrier::ComputeShaderUnorderedAccess, SimpleBarrier::CopySource, 0, i);
+			for (uint32_t m = 0; m < numMips; m++)
+			{
+				cmd.AddTextureBarrierAtSubresource(*this, SimpleBarrier::Discard, SimpleBarrier::CopyDest, 0, i + m + 1);
+				cmd.AddTextureBarrierAtSubresource(unorderedRef, SimpleBarrier::ComputeShaderUnorderedAccess, SimpleBarrier::CopySource, 0, i + m);
+			}
 			cmd.FlushBarriers();
 
-			cmd.CopyTextureSubresource(unorderedRef, 0, i, *this, 0, i + 1);
-		}
+			for (uint32_t m = 0; m < numMips; m++)
+			{
+				cmd.CopyTextureSubresource(unorderedRef, 0, i + m, *this, 0, i + m + 1);
+			}
 
-		cmd.AddTextureBarrierAtSubresource(*this, SimpleBarrier::CopyDest, SimpleBarrier::PixelShaderResource, 0, desc.mipLevels - 1);
-		cmd.FlushBarriers();
+			const uint32_t nextSrcMip = i + numMips;
+			const bool hasNextDispatch = (nextSrcMip < lastMip);
+			for (uint32_t m = 0; m < numMips; m++)
+			{
+				const uint32_t realMip = i + m + 1;
+				const bool isNextSource = hasNextDispatch && (realMip == nextSrcMip);
+				if (!isNextSource)
+				{
+					cmd.AddTextureBarrierAtSubresource(*this, SimpleBarrier::CopyDest, SimpleBarrier::PixelShaderResource, 0, realMip);
+				}
+			}
+			cmd.FlushBarriers();
+
+			i += numMips;
+		}
 
 		return DetailedResult::Success();
 	}
@@ -3647,30 +3761,12 @@ namespace ig
 		assert(destImage.GetNumFaces() == desc.numFaces && "image must match texture");
 		assert(destImage.GetMipLevels() == desc.mipLevels && "image must match texture");
 
-		const uint32_t frameIndex = context.GetFrameIndex();
+		uint32_t frameIndex = context.GetFrameIndex();
 
 		assert(frameIndex < GetPerFrameArrayLength());
 		assert(implPerFrame);
-		assert(implPerFrame[frameIndex].mapped);
 
-		byte* destPtr = (byte*)destImage.GetPixels();
-		byte* srcPtr = (byte*)implPerFrame[frameIndex].mapped;
-		const uint32_t textureRowPitch = context.GetGraphicsSpecs().bufferPlacementAlignments.textureRowPitch;
-		for (uint32_t faceIndex = 0; faceIndex < desc.numFaces; faceIndex++)
-		{
-			for (uint32_t mipIndex = 0; mipIndex < desc.mipLevels; mipIndex++)
-			{
-				size_t srcRowPitch = AlignUp(Image::CalculateMipRowPitch(desc.extent, desc.format, mipIndex), textureRowPitch);
-				size_t destRowPitch = destImage.GetMipRowPitch(mipIndex);
-				for (uint64_t destProgress = 0; destProgress < destImage.GetMipSize(mipIndex); destProgress += destRowPitch)
-				{
-					memcpy(destPtr, srcPtr, destRowPitch);
-					srcPtr += srcRowPitch;
-					destPtr += destRowPitch;
-					assert(destProgress + destRowPitch <= destImage.GetMipSize(mipIndex));
-				}
-			}
-		}
+		Impl_ReadPixels(destImage, frameIndex);
 	}
 
 	std::unique_ptr<Image> Texture::ReadPixels()

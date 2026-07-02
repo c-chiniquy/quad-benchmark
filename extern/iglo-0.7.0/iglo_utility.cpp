@@ -70,6 +70,22 @@ namespace ig
 		}
 	}
 
+	void LogLimited(uint32_t& in_out_counter, LogType type, const std::string& message, uint32_t maxLogCount)
+	{
+		if (in_out_counter >= maxLogCount) return;
+
+		in_out_counter++;
+		
+		if (in_out_counter >= maxLogCount)
+		{
+			Log(type, ToString(message, "\n(This message was logged ", maxLogCount, " times and will not be logged again.)"));
+		}
+		else
+		{
+			Log(type, message);
+		}
+	}
+
 	void SetLogCallback(CallbackLog logFunc)
 	{
 		logCallback = logFunc;
@@ -2511,12 +2527,6 @@ namespace ig
 		{
 			return value; // Already aligned
 		}
-	}
-
-	bool IsPowerOf2(uint64_t value)
-	{
-		if (value == 0) return false;
-		return ((value & (value - 1)) == 0);
 	}
 
 	float Lerp(float a, float b, float t)

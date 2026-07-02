@@ -116,6 +116,10 @@ namespace ig
 	// You can decide how a debug message is handled with SetLogCallback(myFunc).
 	void Log(LogType type, const std::string& message);
 
+	// Logs a debug message and increments 'counter', but only while 'counter' is below 'maxLogCount'.
+	// If 'counter' reaches 'maxLogCount', it will log an additional message saying it will stop logging this message from now on.
+	void LogLimited(uint32_t& in_out_counter, LogType type, const std::string& message, uint32_t maxLogCount = 10);
+
 	// Logs a debug message (FatalError) and aborts the app
 	[[noreturn]] void Fatal(const std::string& message);
 
@@ -226,13 +230,11 @@ namespace ig
 		static float Distance(float x1, float y1, float x2, float y2);
 		static float Distance(const Vector2& p0, const Vector2& p1);
 
-		// Returns the length of this vector.
+		// Gets the length of this vector
 		float GetMagnitude() const;
 		float GetSquaredMagnitude() const;
 		Vector2 GetNormalized() const;
-		//TODO: i want the option of rotating by degrees 0-360.
 		Vector2 GetRotated(float rotationInRadians) const;
-		//TODO: More serious rotation functions for 2D and 3D vectors.
 
 		std::string ToString() const;
 
@@ -856,7 +858,7 @@ namespace ig
 		// 50% chance of returning true.
 		bool NextBool();
 
-		// 'probability' must be in the range 0.0f to 1.0f. Higher probability means higher chance of returning true.
+		// 'probability' must be in the range [0.0f, 1.0f]. Higher probability means higher chance of returning true.
 		// Example: 0.2f = returns true 20% of the time.
 		bool NextProbability(float probability);
 
@@ -893,9 +895,14 @@ namespace ig
 
 	// The alignment is required to be a power of 2.
 	uint64_t AlignUp(uint64_t value, uint64_t alignment);
-	bool IsPowerOf2(uint64_t value);
 	float Lerp(float a, float b, float t);
 	double Lerp(double a, double b, double t);
+
+	constexpr bool IsPowerOf2(uint64_t value)
+	{
+		if (value == 0) return false;
+		return ((value & (value - 1)) == 0);
+	}
 
 } // namespace ig
 

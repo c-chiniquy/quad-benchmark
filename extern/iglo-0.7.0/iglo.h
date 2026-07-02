@@ -8,7 +8,7 @@
 
 // -------------------- Version --------------------//
 #define IGLO_VERSION_MAJOR 0
-#define IGLO_VERSION_MINOR 6
+#define IGLO_VERSION_MINOR 7
 #define IGLO_VERSION_PATCH 0
 
 #define IGLO_STRINGIFY_HELPER(x) #x
@@ -912,7 +912,6 @@ namespace ig
 		uint32_t GetHeight() const { return desc.extent.height; }
 		Format GetFormat() const { return desc.format; }
 		uint32_t GetMipLevels() const { return desc.mipLevels; }
-		bool HasMipmaps() const { return desc.mipLevels > 1; }
 		uint32_t GetNumFaces() const { return desc.numFaces; }
 		bool IsCubemap() const { return desc.isCubemap; }
 
@@ -938,7 +937,7 @@ namespace ig
 		// Gets the byte size of this image (including all faces and mipLevels).
 		size_t GetSize() const { return size; }
 
-		// Gets the byte size of a mipmap slice. 'mipIndex' is zero based.
+		// Gets the byte size of a mip slice. 'mipIndex' is zero based.
 		size_t GetMipSize(uint32_t mipIndex) const;
 		uint32_t GetMipRowPitch(uint32_t mipIndex) const;
 		Extent2D GetMipExtent(uint32_t mipIndex) const;
@@ -946,8 +945,7 @@ namespace ig
 		void* GetPixels() const { return (void*)pixelsPtr; }
 
 		// Gets the pixel data starting at specified mip index and face index.
-		// faceIndex=0, mipIndex=0 will get the pixels located at the first mip at the first face.
-		void* GetMipPixels(uint32_t faceIndex, uint32_t mipIndex) const;
+		void* GetPixelsAtSubresource(uint32_t faceIndex, uint32_t mipIndex) const;
 
 		bool IsWrapped() const { return ownership == PixelOwnership::Wrapped; }
 
@@ -1056,13 +1054,13 @@ namespace ig
 		static std::unique_ptr<Texture> Create(const IGLOContext&, const TextureDesc&);
 
 		static std::unique_ptr<Texture> LoadFromFile(const IGLOContext&, CommandList&,
-			const std::string& filename, bool generateMipmaps = true, bool sRGB = false);
+			const std::string& filename, bool generateMips = false, bool sRGB = false);
 
 		static std::unique_ptr<Texture> LoadFromMemory(const IGLOContext&, CommandList&,
-			const byte* fileData, size_t numBytes, bool generateMipmaps = true, bool sRGB = false);
+			const byte* fileData, size_t numBytes, bool generateMips = false, bool sRGB = false);
 
 		static std::unique_ptr<Texture> LoadFromMemory(const IGLOContext&, CommandList&,
-			const Image& image, bool generateMipmaps = true);
+			const Image& image, bool generateMips = false);
 
 		// Creates a non-owning wrapper for existing graphics API resources and descriptors.
 		// NOTE: This texture has no ownership over its resources/descriptors, and will not free them when destroyed.
@@ -1137,6 +1135,7 @@ namespace ig
 
 		void Impl_Destroy();
 		DetailedResult Impl_Create();
+		void Impl_ReadPixels(Image& destImage, uint32_t frameIndex);
 		DetailedResult GenerateMips(CommandList& cmd, const Image& image);
 		uint32_t GetPerFrameArrayLength() const;
 		static DetailedResult ValidateMipGeneration(CommandListType, const Image& image);
@@ -1855,7 +1854,8 @@ namespace ig
 		ResolveSource,
 		ResolveDest,
 		ClearUnorderedAccess,
-		ClearInactiveRenderTarget, // For clearing render targets that aren't set as current render target.
+		ClearInactiveRenderTexture, // For clearing render textures that aren't active render targets.
+		ClearInactiveDepthBuffer, // For clearing depth buffers that aren't active render targets.
 	};
 	struct SimpleBarrierInfo
 	{
@@ -1920,6 +1920,10 @@ namespace ig
 		void BeginRenderPass(const Texture* renderTexture, const Texture* depthBuffer = nullptr, bool optimizedClear = false);
 		void BeginRenderPassMultiTarget(const Texture* const* renderTextures, uint32_t numRenderTextures,
 			const Texture* depthBuffer = nullptr, bool optimizedClear = false);
+
+#ifdef IGLO_VULKAN
+		void BeginRenderPass_Vulkan(const VulkanRenderInfo& info);
+#endif
 
 		void EndRenderPass();
 
@@ -2018,9 +2022,16 @@ namespace ig
 		void Impl_CopyTextureSubresource(const Texture& source, uint32_t sourceFaceIndex, uint32_t sourceMipIndex,
 			const Texture& destination, uint32_t destFaceIndex, uint32_t destMipIndex);
 		void Impl_CopyTextureToReadableTexture(const Texture& source, const Texture& destination);
+		void Impl_CopyTextureSubresourceToReadableTexture(const Texture& source, uint32_t sourceFaceIndex,
+			uint32_t sourceMipIndex, const Texture& destination);
 
 		void CopyTextureToReadableTexture(const Texture& source, const Texture& destination);
 		static void AssertPushConstants(const void* data, uint32_t sizeInBytes, uint32_t destOffsetInBytes);
+#ifdef IGLO_VULKAN
+		//NOTE: The returned VkRenderingInfo should be considered temporary because
+		//      it contains pointers that point to VulkanRenderInfo items.
+		static VkRenderingInfo ConstructTemporaryVkRenderingInfo(const VulkanRenderInfo&);
+#endif
 	};
 
 	struct TempBuffer
@@ -2658,10 +2669,11 @@ namespace ig
 		// Gets the max allowed MSAA per texture format.
 		MSAA GetMaxMultiSampleCount(Format textureFormat) const;
 
-		const Pipeline& GetMipmapGenerationPipeline() const { return *genMipsPipeline; }
+		const Pipeline& GetPipeline_GenerateMips_Pow2() const { return *pipeline_genMips_pow2; }
+		const Pipeline& GetPipeline_GenerateMips_NonPow2() const { return *pipeline_genMips_nonPow2; }
 
-		// The bilinear clamp sampler is needed for the mipmap generation pipeline.
-		Descriptor GetBilinearClampSamplerDescriptor() const { return bilinearClampSampler->GetDescriptor(); }
+		// Bilinear clamp sampler is needed for the mip gen shaders
+		Descriptor GetSampler_BilinearClamp() const { return sampler_bilinearClamp->GetDescriptor(); }
 
 		// All queried memory info (RAM/VRAM) are estimations and should only be used for debugging/warnings.
 		SystemMemoryInfo QuerySystemMemoryInfo();
@@ -2772,8 +2784,9 @@ namespace ig
 		uint32_t numFramesInFlight = 0; // Can change at runtime. Can't be higher than maxFramesInFlight.
 		uint32_t frameIndex = 0; // always capped by numFramesInFlight
 
-		std::unique_ptr<Pipeline> genMipsPipeline;
-		std::unique_ptr<Sampler> bilinearClampSampler; // For the mipmap generation compute shader
+		std::unique_ptr<Pipeline> pipeline_genMips_pow2;
+		std::unique_ptr<Pipeline> pipeline_genMips_nonPow2;
+		std::unique_ptr<Sampler> sampler_bilinearClamp; // For the mip gen shaders
 
 		mutable std::unique_ptr<DescriptorHeap> descriptorHeap;
 		mutable std::unique_ptr<UploadHeap> uploadHeap;

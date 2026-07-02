@@ -15,7 +15,7 @@ set(PROJECT_SOURCES
 )
 
 # iglo
-set(IGLO_INCLUDE_DIR "${CMAKE_SOURCE_DIR}/extern/iglo-0.6.0")
+set(IGLO_INCLUDE_DIR "${CMAKE_SOURCE_DIR}/extern/iglo-0.7.0")
 set(IGLO_SOURCES
     ${IGLO_INCLUDE_DIR}/iglo.h
     ${IGLO_INCLUDE_DIR}/iglo.cpp
