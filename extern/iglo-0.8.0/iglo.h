@@ -8,7 +8,7 @@
 
 // -------------------- Version --------------------//
 #define IGLO_VERSION_MAJOR 0
-#define IGLO_VERSION_MINOR 7
+#define IGLO_VERSION_MINOR 8
 #define IGLO_VERSION_PATCH 0
 
 #define IGLO_STRINGIFY_HELPER(x) #x
@@ -23,6 +23,7 @@
 
 #include <queue>
 #include <mutex>
+#include <atomic>
 
 namespace ig
 {
@@ -79,6 +80,7 @@ namespace ig
 	enum class BarrierLayout : uint64_t;
 	enum class SimpleBarrier;
 	struct SimpleBarrierInfo;
+	struct TextureCopyLocation;
 	class CommandList;
 	struct TempBuffer;
 	class UploadHeap;
@@ -100,15 +102,15 @@ namespace ig
 	class IGLOContext;
 
 	// -------------------- Constants --------------------//
-	constexpr uint32_t MAX_SIMULTANEOUS_RENDER_TARGETS = 8;
-	constexpr uint32_t MAX_QUEUED_BARRIERS_PER_TYPE = 16;
-	constexpr uint32_t MAX_VERTEX_BUFFER_BIND_SLOTS = 32;
-	constexpr uint32_t MAX_COMMAND_LISTS_PER_SUBMIT = 64;
+	inline constexpr uint32_t MAX_SIMULTANEOUS_RENDER_TARGETS = 8;
+	inline constexpr uint32_t MAX_QUEUED_BARRIERS_PER_TYPE = 16;
+	inline constexpr uint32_t MAX_VERTEX_BUFFER_BIND_SLOTS = 32;
+	inline constexpr uint32_t MAX_COMMAND_LISTS_PER_SUBMIT = 64;
 
 	// The guaranteed minimum push constant size is 256 bytes in D3D12 and 128 bytes in Vulkan 1.3.
 	// To ensure cross-compatibility, we cap the maximum at 128 bytes.
 	// Push constants should not be used for large data transfers anyway.
-	constexpr uint64_t MAX_PUSH_CONSTANTS_BYTE_SIZE = 128;
+	inline constexpr uint64_t MAX_PUSH_CONSTANTS_BYTE_SIZE = 128;
 
 
 	// -------------------- Pick Graphics API --------------------//
@@ -137,7 +139,7 @@ namespace ig
 #define IGLO_GRAPHICS_API_STRING "Vulkan"
 #endif
 
-// -------------------- Backend Header Dependencies --------------------//
+	// -------------------- Backend Header Dependencies --------------------//
 
 	enum class DescriptorType
 	{
@@ -802,6 +804,8 @@ namespace ig
 		DEPTHFORMAT_UINT24_BYTE, // 24-bit unsigned normalized integer for depth component, 8-bit unsigned non normalized integer for stencil component.
 		DEPTHFORMAT_FLOAT,  // 32-bit float for depth component
 		DEPTHFORMAT_FLOAT_BYTE, // 32-bit float for depth component, 8-bit unsigned non normalized integer for stencil component.
+
+		COUNT, // Not a format. Used to keep count.
 	};
 
 	enum class IndexFormat
@@ -1136,7 +1140,7 @@ namespace ig
 		void Impl_Destroy();
 		DetailedResult Impl_Create();
 		void Impl_ReadPixels(Image& destImage, uint32_t frameIndex);
-		DetailedResult GenerateMips(CommandList& cmd, const Image& image);
+		void GenerateMips(CommandList& cmd, const Image& image);
 		uint32_t GetPerFrameArrayLength() const;
 		static DetailedResult ValidateMipGeneration(CommandListType, const Image& image);
 	};
@@ -1866,6 +1870,14 @@ namespace ig
 	};
 	SimpleBarrierInfo GetSimpleBarrierInfo(SimpleBarrier simpleBarrier, CommandListType queueType);
 
+	struct TextureCopyLocation
+	{
+		uint32_t faceIndex = 0;
+		uint32_t mipIndex = 0;
+		uint32_t offsetX = 0;
+		uint32_t offsetY = 0;
+	};
+
 	class CommandList
 	{
 	private:
@@ -1977,16 +1989,28 @@ namespace ig
 
 		void DispatchCompute(uint32_t threadGroupCountX, uint32_t threadGroupCountY, uint32_t threadGroupCountZ);
 
-		void CopyTexture(const Texture& source, const Texture& destination);
-		void CopyTextureSubresource(const Texture& source, uint32_t sourceFaceIndex, uint32_t sourceMipIndex,
-			const Texture& destination, uint32_t destFaceIndex, uint32_t destMipIndex);
-		void CopyBuffer(const Buffer& source, const Buffer& destination);
+		void CopyTexture(const Texture& src, const Texture& dest);
+		void CopyTextureSubresource(
+			const Texture& src, uint32_t srcFaceIndex, uint32_t srcMipIndex,
+			const Texture& dest, uint32_t destFaceIndex, uint32_t destMipIndex);
+		void CopyTextureRegion(
+			const Texture& src, TextureCopyLocation srcLocation,
+			const Texture& dest, TextureCopyLocation destLocation, Extent2D regionExtent);
 
-		void CopyTempBufferToTexture(const TempBuffer& source, const Texture& destination);
-		void CopyTempBufferToTextureSubresource(const TempBuffer& source, const Texture& destination, uint32_t destFaceIndex, uint32_t destMipIndex);
-		void CopyTempBufferToBuffer(const TempBuffer& source, const Buffer& destination);
+		void CopyBuffer(const Buffer& src, const Buffer& dest);
 
-		void ResolveTexture(const Texture& source, const Texture& destination);
+		void CopyTempBufferToTexture(const TempBuffer& src, const Texture& dest);
+		void CopyTempBufferToTextureSubresource(const TempBuffer& src, const Texture& dest, uint32_t destFaceIndex, uint32_t destMipIndex);
+		void CopyTempBufferToBuffer(const TempBuffer& src, const Buffer& dest);
+
+		void ResolveTexture(const Texture& src, const Texture& dest);
+
+		// Aborts on failure
+		Descriptor CreateTempConstant(const void* data, uint64_t numBytes) const;
+		// Aborts on failure
+		Descriptor CreateTempStructuredBuffer(const void* data, uint32_t elementStride, uint32_t numElements) const;
+		// Aborts on failure
+		Descriptor CreateTempRawBuffer(const void* data, uint64_t numBytes) const;
 
 		CommandListType GetCommandListType() const { return commandListType; }
 
@@ -1997,11 +2021,18 @@ namespace ig
 		VkCommandBuffer GetVulkanCommandBuffer() const { return impl.commandBuffer[frameIndex]; }
 #endif
 
+		bool IsRecording() const { return isRecording; }
+		bool IsPending() const { return isPending; }
+
+		void _internal_MarkAsNotPending() const { isPending = false; }
+
 	private:
 		const IGLOContext& context;
 		const CommandListType commandListType = CommandListType::Graphics;
 		const uint32_t maxFrames = 0;
 		uint32_t frameIndex = 0;
+		bool isRecording = false;
+		mutable bool isPending = false;
 
 		Impl_CommandList impl;
 
@@ -2018,14 +2049,17 @@ namespace ig
 		void Impl_SetPushConstants(const void* data, uint32_t sizeInBytes, uint32_t destOffsetInBytes);
 		void Impl_SetComputePushConstants(const void* data, uint32_t sizeInBytes, uint32_t destOffsetInBytes);
 		void Impl_SetVertexBuffers(const Buffer* const* vertexBuffers, uint32_t count, uint32_t startSlot);
-		void Impl_CopyTexture(const Texture& source, const Texture& destination);
-		void Impl_CopyTextureSubresource(const Texture& source, uint32_t sourceFaceIndex, uint32_t sourceMipIndex,
-			const Texture& destination, uint32_t destFaceIndex, uint32_t destMipIndex);
-		void Impl_CopyTextureToReadableTexture(const Texture& source, const Texture& destination);
-		void Impl_CopyTextureSubresourceToReadableTexture(const Texture& source, uint32_t sourceFaceIndex,
-			uint32_t sourceMipIndex, const Texture& destination);
+		void Impl_CopyTexture(const Texture& src, const Texture& dest);
+		void Impl_CopyTextureSubresource(
+			const Texture& src, uint32_t srcFaceIndex, uint32_t srcMipIndex,
+			const Texture& dest, uint32_t destFaceIndex, uint32_t destMipIndex);
+		void Impl_CopyTextureRegion(
+			const Texture& src, TextureCopyLocation srcLocation,
+			const Texture& dest, TextureCopyLocation destLocation, Extent2D regionExtent);
+		void Impl_CopyTextureToReadableTexture(const Texture& src, const Texture& dest);
+		void Impl_CopyTextureSubresourceToReadableTexture(const Texture& src, uint32_t srcFaceIndex, uint32_t srcMipIndex, const Texture& dest);
 
-		void CopyTextureToReadableTexture(const Texture& source, const Texture& destination);
+		void CopyTextureToReadableTexture(const Texture& src, const Texture& dest);
 		static void AssertPushConstants(const void* data, uint32_t sizeInBytes, uint32_t destOffsetInBytes);
 #ifdef IGLO_VULKAN
 		//NOTE: The returned VkRenderingInfo should be considered temporary because
@@ -2254,7 +2288,7 @@ namespace ig
 	enum class EventType
 	{
 		None = 0,
-		Resize, // The backbuffer changed size.
+		Resize, // The backbuffer changed size. Emitted while the GPU is idle, so feel free to destroy resources instantly.
 		CloseRequest, // User either pressed Alt F4 or pressed the X button to close the window.
 		LostFocus,
 		GainedFocus,
@@ -2625,8 +2659,16 @@ namespace ig
 		// Null receipts are legal to pass to this function, they will be treated as completed.
 		void WaitForCompletion(Receipt receipt);
 
-		// Waits for the graphics device to finish executing all commands.
+		// Waits for the graphics device to finish executing all submitted commands.
+		// This is safe to call at any time, from any thread, including while another thread is recording commands.
+		// Will free all temporary resources if it can.
 		void WaitForIdleDevice();
+
+		// Same as WaitForIdleDevice(), except it aborts if temporary resources
+		// could not be freed because a command list was still pending.
+		// Use this when reclaiming the memory actually matters,
+		// such as when unloading a scene before loading a new one.
+		void WaitForIdleDeviceAndReclaim();
 
 		// Destroying a GPU resource while it's still in use by a previous frame
 		// results in undefined behavior and may cause device loss or driver crashes.
@@ -2639,13 +2681,6 @@ namespace ig
 #ifdef IGLO_VULKAN
 		void DelayedDestroyVulkanImageView(VkImageView) const;
 #endif
-
-		// Aborts on failure
-		Descriptor CreateTempConstant(const void* data, uint64_t numBytes) const;
-		// Aborts on failure
-		Descriptor CreateTempStructuredBuffer(const void* data, uint32_t elementStride, uint32_t numElements) const;
-		// Aborts on failure
-		Descriptor CreateTempRawBuffer(const void* data, uint64_t numBytes) const;
 
 		uint32_t GetMaxFramesInFlight() const { return maxFramesInFlight; }
 		uint32_t GetNumFramesInFlight() const { return numFramesInFlight; }
@@ -2666,8 +2701,8 @@ namespace ig
 		UploadHeap& GetUploadHeap() const { return *uploadHeap; }
 		CommandQueue& GetCommandQueue() const { return *commandQueue; }
 
-		// Gets the max allowed MSAA per texture format.
-		MSAA GetMaxMultiSampleCount(Format textureFormat) const;
+		// Gets the max supported MSAA for the given texture format.
+		MSAA GetMaxMSAA(Format textureFormat) const;
 
 		const Pipeline& GetPipeline_GenerateMips_Pow2() const { return *pipeline_genMips_pow2; }
 		const Pipeline& GetPipeline_GenerateMips_NonPow2() const { return *pipeline_genMips_nonPow2; }
@@ -2690,9 +2725,14 @@ namespace ig
 		VkSurfaceKHR GetVulkanSurface() const { return graphics.surface; }
 		VkSwapchainKHR GetVulkanSwapChain() const { return graphics.swapChain; }
 #endif
+		void _internal_IncrementNumPendingCommandLists() const;
+		void _internal_DecrementNumPendingCommandLists() const;
+		uint32_t _internal_GetNumPendingCommandLists() const;
 
 	private:
+
 		//------------------ Core ------------------//
+
 		bool isWindowInitialized = false;
 		bool isGraphicsDeviceInitialized = false;
 
@@ -2795,7 +2835,13 @@ namespace ig
 
 		CallbackOnDeviceLost callbackOnDeviceLost = nullptr;
 
-		void FreeAllTempResources();
+		mutable std::mutex pendingCommandListMutex;
+		mutable uint32_t numPendingCommandLists = 0;
+
+		// Frees all temp resources if no command lists are pending.
+		// Returns true if resources were freed.
+		// If 'mustSucceed' is true, aborts instead of returning false.
+		bool TryFreeAllTempResources(bool mustSucceed);
 
 #ifdef IGLO_D3D12
 		bool ResizeD3D12SwapChain(Extent2D extent);
@@ -2813,7 +2859,7 @@ namespace ig
 		void NotifyDeviceLost();
 
 		void Impl_Present();
-		uint32_t Impl_GetMaxMultiSampleCount(Format textureFormat) const;
+		uint32_t Impl_GetMaxMSAA(Format textureFormat) const;
 		DetailedResult Impl_InitGraphicsDevice();
 		void Impl_DestroyGraphicsDevice();
 	};
