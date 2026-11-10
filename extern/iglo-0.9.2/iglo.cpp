@@ -621,32 +621,32 @@ namespace ig
 	}
 
 	std::unique_ptr<Pipeline> Pipeline::LoadFromFile(const IGLOContext& context,
-		const std::string& filepathVS, const char* entryPointNameVS,
-		const std::string& filepathPS, const char* entryPointNamePS,
+		const std::string& filenameVS, const char* entryPointNameVS,
+		const std::string& filenamePS, const char* entryPointNamePS,
 		const RenderTargetDesc& renderTargetDesc, const std::vector<VertexElement>& vertexLayout,
 		PrimitiveTopology primitiveTopology, DepthDesc depth, RasterizerDesc rasterizer, const std::vector<BlendDesc>& blend)
 	{
 		const char* errStr = "Failed to create graphics pipeline state. Reason: ";
 
-		if (filepathVS.empty() || filepathPS.empty())
+		if (filenameVS.empty() || filenamePS.empty())
 		{
 			Log(LogType::Error, ToString(errStr, "Couldn't read shader bytecode from file because empty filepath was provided."));
 			return nullptr;
 		}
 
 		// Vertex shader
-		ReadFileResult VS = ReadFile(filepathVS);
+		ReadFileResult VS = ReadFile(filenameVS);
 		if (!VS.success)
 		{
-			Log(LogType::Error, ToString(errStr, "Failed to read shader bytecode from file '", filepathVS, "'."));
+			Log(LogType::Error, ToString(errStr, "Failed to read shader bytecode from file '", filenameVS, "'."));
 			return nullptr;
 		}
 
 		// Pixel shader
-		ReadFileResult PS = ReadFile(filepathPS);
+		ReadFileResult PS = ReadFile(filenamePS);
 		if (!PS.success)
 		{
-			Log(LogType::Error, ToString(errStr, "Failed to read shader bytecode from file '", filepathPS, "'."));
+			Log(LogType::Error, ToString(errStr, "Failed to read shader bytecode from file '", filenamePS, "'."));
 			return nullptr;
 		}
 
@@ -1227,7 +1227,7 @@ namespace ig
 	{
 		assert(slot < MAX_VERTEX_BUFFER_BIND_SLOTS);
 
-		TempBuffer vb = context.GetUploadHeap().AllocateTempBuffer(sizeInBytes,
+		TempBuffer vb = context.GetTempBufferAllocator().AllocateTempBuffer(sizeInBytes,
 			context.GetGraphicsSpecs().bufferPlacementAlignments.vertexOrIndexBuffer);
 
 		memcpy(vb.data, data, sizeInBytes);
@@ -1327,11 +1327,11 @@ namespace ig
 		if (!isRecording) Fatal(ToString(errStr, "Command list must be recording."));
 
 		DescriptorHeap& descriptorHeap = context.GetDescriptorHeap();
-		UploadHeap& uploadHeap = context.GetUploadHeap();
+		TempBufferAllocator& tempBufferAllocator = context.GetTempBufferAllocator();
 		const BufferPlacementAlignments& placementAlignments = context.GetGraphicsSpecs().bufferPlacementAlignments;
 
 		const Descriptor out = descriptorHeap.AllocateTempResource();
-		const TempBuffer tempBuffer = uploadHeap.AllocateTempBuffer(numBytes, placementAlignments.constant);
+		const TempBuffer tempBuffer = tempBufferAllocator.AllocateTempBuffer(numBytes, placementAlignments.constant);
 
 		memcpy(tempBuffer.data, data, numBytes);
 
@@ -1359,7 +1359,7 @@ namespace ig
 		if (!isRecording) Fatal(ToString(errStr, "Command list must be recording."));
 
 		DescriptorHeap& descriptorHeap = context.GetDescriptorHeap();
-		UploadHeap& uploadHeap = context.GetUploadHeap();
+		TempBufferAllocator& tempBufferAllocator = context.GetTempBufferAllocator();
 		const BufferPlacementAlignments& placementAlignments = context.GetGraphicsSpecs().bufferPlacementAlignments;
 
 		const Descriptor out = descriptorHeap.AllocateTempResource();
@@ -1367,7 +1367,7 @@ namespace ig
 #ifdef IGLO_D3D12
 		// In D3D12, structured buffers need a special non-power of 2 element stride alignment,
 		// which is why we allocate 1 extra element here.
-		const TempBuffer tempBuffer = uploadHeap.AllocateTempBuffer(numBytes + elementStride, placementAlignments.rawOrStructuredBuffer);
+		const TempBuffer tempBuffer = tempBufferAllocator.AllocateTempBuffer(numBytes + elementStride, placementAlignments.rawOrStructuredBuffer);
 
 		// We pretend the entire page is an array of elements.
 		// We must figure out the index of our first element, aligned upwards to 'elementStride'.
@@ -1380,7 +1380,7 @@ namespace ig
 		context.GetD3D12Device()->CreateShaderResourceView(tempBuffer.impl.resource, &srv, descriptorHeap.GetD3D12CPUHandle(out));
 #endif
 #ifdef IGLO_VULKAN
-		const TempBuffer tempBuffer = uploadHeap.AllocateTempBuffer(numBytes, placementAlignments.rawOrStructuredBuffer);
+		const TempBuffer tempBuffer = tempBufferAllocator.AllocateTempBuffer(numBytes, placementAlignments.rawOrStructuredBuffer);
 
 		memcpy(tempBuffer.data, data, numBytes);
 
@@ -1400,11 +1400,11 @@ namespace ig
 		if (!isRecording) Fatal(ToString(errStr, "Command list must be recording."));
 
 		DescriptorHeap& descriptorHeap = context.GetDescriptorHeap();
-		UploadHeap& uploadHeap = context.GetUploadHeap();
+		TempBufferAllocator& tempBufferAllocator = context.GetTempBufferAllocator();
 		const BufferPlacementAlignments& placementAlignments = context.GetGraphicsSpecs().bufferPlacementAlignments;
 
 		const Descriptor out = descriptorHeap.AllocateTempResource();
-		const TempBuffer tempBuffer = uploadHeap.AllocateTempBuffer(numBytes, placementAlignments.rawOrStructuredBuffer);
+		const TempBuffer tempBuffer = tempBufferAllocator.AllocateTempBuffer(numBytes, placementAlignments.rawOrStructuredBuffer);
 
 		memcpy(tempBuffer.data, data, numBytes);
 
@@ -1419,7 +1419,7 @@ namespace ig
 		return out;
 	}
 
-	void UploadHeap::Page::Free(const IGLOContext& context)
+	void TempBufferAllocator::Page::Free(const IGLOContext& context)
 	{
 		Impl_Free(context);
 
@@ -1427,7 +1427,7 @@ namespace ig
 		sizeInBytes = 0;
 	}
 
-	UploadHeap::~UploadHeap()
+	TempBufferAllocator::~TempBufferAllocator()
 	{
 		for (size_t i = 0; i < perFrame.size(); i++)
 		{
@@ -1447,10 +1447,10 @@ namespace ig
 		perFrame.clear();
 	}
 
-	std::pair<std::unique_ptr<UploadHeap>, DetailedResult> UploadHeap::Create(
+	std::pair<std::unique_ptr<TempBufferAllocator>, DetailedResult> TempBufferAllocator::Create(
 		const IGLOContext& context, uint64_t linearPageSize, uint32_t numFramesInFlight)
 	{
-		std::unique_ptr<UploadHeap> out = std::unique_ptr<UploadHeap>(new UploadHeap(
+		std::unique_ptr<TempBufferAllocator> out = std::unique_ptr<TempBufferAllocator>(new TempBufferAllocator(
 			context, linearPageSize, numFramesInFlight));
 
 		// Each frame has a set number of persistent pages, and a changing number of temporary pages placed ontop.
@@ -1476,7 +1476,7 @@ namespace ig
 		return { std::move(out), DetailedResult::Success() };
 	}
 
-	void UploadHeap::NextFrame()
+	void TempBufferAllocator::NextFrame()
 	{
 		lastFrameStats = GetCurrentStats();
 
@@ -1486,7 +1486,7 @@ namespace ig
 		FreeTempPagesAtFrame(context, perFrame[frameIndex]);
 	}
 
-	void UploadHeap::FreeAllTempPages()
+	void TempBufferAllocator::FreeAllTempPages()
 	{
 		for (size_t i = 0; i < perFrame.size(); i++)
 		{
@@ -1494,7 +1494,7 @@ namespace ig
 		}
 	}
 
-	void UploadHeap::FreeTempPagesAtFrame(const IGLOContext& context, PerFrame& perFrame)
+	void TempBufferAllocator::FreeTempPagesAtFrame(const IGLOContext& context, PerFrame& perFrame)
 	{
 		// Delete extra linear pages
 		while (perFrame.linearPages.size() > numPersistentPages)
@@ -1514,7 +1514,7 @@ namespace ig
 		perFrame.linearNextByte = 0;
 	}
 
-	TempBuffer UploadHeap::AllocateTempBuffer(uint64_t sizeInBytes, uint32_t alignment)
+	TempBuffer TempBufferAllocator::AllocateTempBuffer(uint64_t sizeInBytes, uint32_t alignment)
 	{
 		assert(frameIndex < perFrame.size());
 		PerFrame& current = perFrame[frameIndex];
@@ -1568,7 +1568,7 @@ namespace ig
 		}
 	}
 
-	UploadHeap::Stats UploadHeap::GetCurrentStats() const
+	TempBufferAllocator::Stats TempBufferAllocator::GetCurrentStats() const
 	{
 		static_assert(numPersistentPages > 0);
 		assert(perFrame.at(frameIndex).linearPages.size() > 0);
@@ -1737,9 +1737,9 @@ namespace ig
 		this->endOfFrame.clear();
 		this->endOfFrame.resize(numFramesInFlight);
 
-		// Recreate the upload heap manager with new number of frames in flight
-		const uint64_t uploadHeapPageSize = this->uploadHeap->GetLinearPageSize();
-		this->uploadHeap = UploadHeap::Create(*this, uploadHeapPageSize, numFramesInFlight).first;
+		// Recreate the temp buffer allocator with new number of frames in flight
+		const uint64_t tempBufferPageSize = this->tempBufferAllocator->GetLinearPageSize();
+		this->tempBufferAllocator = TempBufferAllocator::Create(*this, tempBufferPageSize, numFramesInFlight).first;
 
 		// The descriptor heap manager can't be recreated here with a new number of frames in flight,
 		// because it contains persistent descriptors which we don't want to destroy.
@@ -1915,7 +1915,7 @@ namespace ig
 		DestroySwapChainResources();
 
 		descriptorHeap = nullptr;
-		uploadHeap = nullptr;
+		tempBufferAllocator = nullptr;
 		commandQueue = nullptr;
 
 		Impl_DestroyGraphicsDevice();
@@ -1961,13 +1961,13 @@ namespace ig
 			commandQueue = std::move(result.first);
 		}
 
-		// Upload heap manager
+		// Temp buffer allocator
 		{
-			auto result = UploadHeap::Create(*this,
-				renderSettings.uploadHeapPageSize,
+			auto result = TempBufferAllocator::Create(*this,
+				renderSettings.tempBufferPageSize,
 				numFramesInFlight);
 			if (!result.second) return result.second;
-			uploadHeap = std::move(result.first);
+			tempBufferAllocator = std::move(result.first);
 		}
 
 		// Descriptor heap manager
@@ -2308,19 +2308,6 @@ namespace ig
 		return out;
 	}
 
-	bool Image::FileIsOfTypeDDS(const byte* fileData, size_t numBytes)
-	{
-		if (numBytes < 8) return false;
-		uint32_t* f32 = (uint32_t*)fileData;
-		uint8_t* f8 = (uint8_t*)fileData;
-		if (f8[0] != 'D') return false;
-		if (f8[1] != 'D') return false;
-		if (f8[2] != 'S') return false;
-		if (f8[3] != ' ') return false;
-		if (f32[1] != 124) return false;
-		return true;
-	}
-
 	// This struct was taken from public domain source SOIL: https://github.com/littlstar/soil/blob/master/include/SOIL/stbi_dds_aug_c.h
 	struct DDS_header
 	{
@@ -2388,6 +2375,53 @@ namespace ig
 #define DDSCAPS2_CUBEMAP_NEGATIVEZ	0x00008000
 #define DDSCAPS2_VOLUME				0x00200000
 
+	// Extended header
+	struct DDS_header_DXT10
+	{
+		uint32_t dxgiFormat;
+		uint32_t resourceDimension;
+		uint32_t miscFlag;
+		uint32_t arraySize;
+		uint32_t miscFlags2;
+	};
+
+#define DDS_DIMENSION_TEXTURE2D			3
+#define DDS_RESOURCE_MISC_TEXTURECUBE	0x4
+
+	bool Image::FileIsOfTypeDDS(const byte* fileData, size_t numBytes)
+	{
+		if (numBytes < 8) return false;
+		uint32_t magic = 0;
+		uint32_t headerSize = 0;
+		memcpy(&magic, fileData, 4);
+		memcpy(&headerSize, fileData + 4, 4);
+		return (magic == DDS_FourCC('D', 'D', 'S', ' ')) && (headerSize == 124);
+	}
+
+	Format Image::DDS_DXGIFormatToFormat(uint32_t dxgiFormat)
+	{
+		switch (dxgiFormat)
+		{
+		case 71: return Format::BC1;
+		case 72: return Format::BC1_sRGB;
+		case 74: return Format::BC2;
+		case 75: return Format::BC2_sRGB;
+		case 77: return Format::BC3;
+		case 78: return Format::BC3_sRGB;
+		case 80: return Format::BC4_UNSIGNED;
+		case 81: return Format::BC4_SIGNED;
+		case 83: return Format::BC5_UNSIGNED;
+		case 84: return Format::BC5_SIGNED;
+		case 95: return Format::BC6H_UFLOAT16;
+		case 96: return Format::BC6H_SFLOAT16;
+		case 98: return Format::BC7;
+		case 99: return Format::BC7_sRGB;
+
+		default:
+			return Format::None;
+		}
+	}
+
 	// Code from public domain source SOIL: https://github.com/littlstar/soil/blob/master/src/soil.c
 	std::unique_ptr<Image> Image::LoadFromDDS(const byte* fileData, size_t numBytes, bool guaranteeOwnership)
 	{
@@ -2398,24 +2432,30 @@ namespace ig
 			Log(LogType::Error, ToString(errStr, "The DDS file is corrupted (too small for expected header)."));
 			return nullptr;
 		}
-		DDS_header* header = (DDS_header*)fileData;
+		const DDS_header* header = (const DDS_header*)fileData;
 		size_t buffer_index = 0;
 		buffer_index = sizeof(DDS_header);
 
 		bool failed = false;
+		{
+			constexpr uint32_t flag = DDS_FourCC('D', 'D', 'S', ' ');
+			if (header->dwMagic != flag) failed = true;
+			if (header->dwSize != 124) failed = true;
+		}
+		{
+			constexpr uint32_t flag = DDSD_CAPS | DDSD_HEIGHT | DDSD_WIDTH | DDSD_PIXELFORMAT;
+			if ((header->dwFlags & flag) != flag) failed = true;
+			if ((header->sCaps.dwCaps1 & DDSCAPS_TEXTURE) == 0) failed = true;
+		}
 
-		uint32_t flag = ('D' << 0) | ('D' << 8) | ('S' << 16) | (' ' << 24);
-		if (header->dwMagic != flag) failed = true;
-		if (header->dwSize != 124) failed = true;
-		flag = DDSD_CAPS | DDSD_HEIGHT | DDSD_WIDTH | DDSD_PIXELFORMAT;
-		if ((header->dwFlags & flag) != flag) failed = true;
-		if ((header->sCaps.dwCaps1 & DDSCAPS_TEXTURE) == 0) failed = true;
-		/*	make sure it is a type we can upload	*/
-		if ((header->sPixelFormat.dwFlags & DDPF_FOURCC) &&
-			!(
-				(header->sPixelFormat.dwFourCC == (('D' << 0) | ('X' << 8) | ('T' << 16) | ('1' << 24))) ||
-				(header->sPixelFormat.dwFourCC == (('D' << 0) | ('X' << 8) | ('T' << 16) | ('3' << 24))) ||
-				(header->sPixelFormat.dwFourCC == (('D' << 0) | ('X' << 8) | ('T' << 16) | ('5' << 24)))))
+		const uint32_t fourCC = header->sPixelFormat.dwFourCC;
+		const bool hasFourCC = (header->sPixelFormat.dwFlags & DDPF_FOURCC) != 0;
+		const bool isUncompressed = !hasFourCC;
+		const bool isDXT1 = hasFourCC && fourCC == DDS_FourCC('D', 'X', 'T', '1');
+		const bool isDXT3 = hasFourCC && fourCC == DDS_FourCC('D', 'X', 'T', '3');
+		const bool isDXT5 = hasFourCC && fourCC == DDS_FourCC('D', 'X', 'T', '5');
+		const bool isDX10 = hasFourCC && fourCC == DDS_FourCC('D', 'X', '1', '0');
+		if (hasFourCC && (!isDXT1 && !isDXT3 && !isDXT5 && !isDX10))
 		{
 			failed = true;
 		}
@@ -2436,22 +2476,21 @@ namespace ig
 		};
 		bool mustConvertBGRToBGRA = false;
 
-		int32_t cubemap = (header->sCaps.dwCaps2 & DDSCAPS2_CUBEMAP) / DDSCAPS2_CUBEMAP;
+		const int32_t cubemap = (header->sCaps.dwCaps2 & DDSCAPS2_CUBEMAP) / DDSCAPS2_CUBEMAP;
 		if (cubemap)
 		{
 			tempDesc.isCubemap = true;
 			tempDesc.numFaces = 6; // A cubemap has 6 faces
 		}
 
-		int32_t volume = (header->sCaps.dwCaps2 & DDSCAPS2_VOLUME) / DDSCAPS2_VOLUME;
+		const int32_t volume = (header->sCaps.dwCaps2 & DDSCAPS2_VOLUME) / DDSCAPS2_VOLUME;
 		if (volume)
 		{
 			Log(LogType::Error, ToString(errStr, "The DDS file contains an unsupported format (3D volume texture)."));
 			return nullptr;
 		}
 
-		int32_t uncompressed = 1 - (header->sPixelFormat.dwFlags & DDPF_FOURCC) / DDPF_FOURCC;
-		if (uncompressed)
+		if (isUncompressed)
 		{
 			if (header->sPixelFormat.dwRGBBitCount == 32)
 			{
@@ -2484,6 +2523,46 @@ namespace ig
 				return nullptr;
 			}
 		}
+		else if (isDX10)
+		{
+			if (numBytes < sizeof(DDS_header) + sizeof(DDS_header_DXT10))
+			{
+				Log(LogType::Error, ToString(errStr, "The DDS file is corrupted (too small for expected DX10 header)."));
+				return nullptr;
+			}
+			const DDS_header_DXT10* dx10 = (const DDS_header_DXT10*)&fileData[buffer_index];
+			buffer_index += sizeof(DDS_header_DXT10); // Pixel data begins after the DX10 header
+
+			if (dx10->resourceDimension != DDS_DIMENSION_TEXTURE2D)
+			{
+				Log(LogType::Error, ToString(errStr, "The DDS file contains an unsupported format (only 2D textures are supported)."));
+				return nullptr;
+			}
+
+			tempDesc.format = DDS_DXGIFormatToFormat(dx10->dxgiFormat);
+			if (tempDesc.format == Format::None)
+			{
+				Log(LogType::Error, ToString(errStr, "The DDS file contains an unsupported DXGI format (", dx10->dxgiFormat, ")."));
+				return nullptr;
+			}
+
+			if (dx10->arraySize > 1)
+			{
+				Log(LogType::Error, ToString(errStr, "The DDS file contains an unsupported format (texture arrays are not supported)."));
+				return nullptr;
+			}
+
+			if (dx10->miscFlag & DDS_RESOURCE_MISC_TEXTURECUBE)
+			{
+				tempDesc.isCubemap = true;
+				tempDesc.numFaces = 6; // A cubemap has 6 faces
+			}
+			else
+			{
+				tempDesc.isCubemap = false;
+				tempDesc.numFaces = 1;
+			}
+		}
 		else
 		{
 			/*	well, we know it is DXT1/3/5, because we checked above	*/
@@ -2496,6 +2575,10 @@ namespace ig
 			case 1: tempDesc.format = Format::BC1; break;
 			case 3: tempDesc.format = Format::BC2; break;
 			case 5: tempDesc.format = Format::BC3; break;
+
+			default:
+				assert(false);
+				break;
 			}
 		}
 
@@ -2827,7 +2910,7 @@ namespace ig
 		uint32_t replaceValue = colorB.rgba;
 
 		// Convert colorA and colorB from RGBA to BGRA
-		if (desc.format == ig::Format::BYTE_BYTE_BYTE_BYTE_BGRA ||
+		if (desc.format == Format::BYTE_BYTE_BYTE_BYTE_BGRA ||
 			desc.format == Format::BYTE_BYTE_BYTE_BYTE_BGRA_sRGB)
 		{
 			findValue = Color32(colorA.blue, colorA.green, colorA.red, colorA.alpha).rgba;
@@ -2913,7 +2996,7 @@ namespace ig
 			currentFrame.DestroyResources(*this);
 
 			descriptorHeap->NextFrame();
-			uploadHeap->NextFrame();
+			tempBufferAllocator->NextFrame();
 		}
 
 		if (!deviceLost)
@@ -2968,7 +3051,7 @@ namespace ig
 	void IGLOContext::_internal_DecrementNumPendingCommandLists() const
 	{
 		std::lock_guard<std::mutex> lock(pendingCommandListMutex);
-		if (numPendingCommandLists == 0) ig::Fatal("There are now less than 0 pending command lists, somehow?");
+		if (numPendingCommandLists == 0) Fatal("There are now less than 0 pending command lists, somehow?");
 		numPendingCommandLists--;
 	}
 	uint32_t IGLOContext::_internal_GetNumPendingCommandLists() const
@@ -3069,7 +3152,7 @@ namespace ig
 		}
 
 		descriptorHeap->FreeAllTempResources();
-		uploadHeap->FreeAllTempPages();
+		tempBufferAllocator->FreeAllTempPages();
 		for (size_t i = 0; i < endOfFrame.size(); i++)
 		{
 			endOfFrame[i].DestroyResources(*this);
@@ -3325,7 +3408,7 @@ namespace ig
 		assert((desc.usage == BufferUsage::Default || desc.usage == BufferUsage::UnorderedAccess) &&
 			"usage must be Default or UnorderedAccess");
 
-		TempBuffer tempBuffer = context.GetUploadHeap().AllocateTempBuffer(desc.size, 1);
+		TempBuffer tempBuffer = context.GetTempBufferAllocator().AllocateTempBuffer(desc.size, 1);
 
 		memcpy(tempBuffer.data, srcData, desc.size);
 
@@ -3508,29 +3591,37 @@ namespace ig
 
 	std::unique_ptr<Texture> Texture::LoadFromMemory(const IGLOContext& context, CommandList& cmd, const Image& image, bool generateMips)
 	{
-		const char* errStr = "Failed to create texture from image. Reason: ";
-
 		bool proceedWithMipGen = generateMips;
 
 		if (generateMips)
 		{
-			// Can we generate mips?
-			DetailedResult result = ValidateMipGeneration(cmd.GetCommandListType(), image);
-			if (!result)
+			if (image.GetMipLevels() > 1)
 			{
-				Log(LogType::Warning, "Unable to generate mips for texture. Reason: " + result.errorMessage);
+				// The image already contains mips, so use those instead of generating new ones.
 				proceedWithMipGen = false;
+			}
+			else
+			{
+				// Can we generate mips?
+				DetailedResult result = ValidateMipGeneration(cmd.GetCommandListType(), image);
+				if (!result)
+				{
+					Log(LogType::Warning, "Unable to generate mips for texture. Reason: " + result.errorMessage);
+					proceedWithMipGen = false;
+				}
 			}
 		}
 
-		TextureDesc selfDesc;
-		selfDesc.extent = Extent2D(image.GetWidth(), image.GetHeight());
-		selfDesc.format = image.GetFormat();
-		selfDesc.usage = TextureUsage::Default;
-		selfDesc.msaa = MSAA::Disabled;
-		selfDesc.isCubemap = image.IsCubemap();
-		selfDesc.numFaces = image.GetNumFaces();
-		selfDesc.mipLevels = proceedWithMipGen ? Image::CalculateNumMips(image.GetExtent()) : image.GetMipLevels();
+		const TextureDesc selfDesc =
+		{
+			.extent = image.GetExtent(),
+			.format = image.GetFormat(),
+			.usage = TextureUsage::Default,
+			.msaa = MSAA::Disabled,
+			.numFaces = image.GetNumFaces(),
+			.mipLevels = proceedWithMipGen ? Image::CalculateNumMips(image.GetExtent()) : image.GetMipLevels(),
+			.isCubemap = image.IsCubemap(),
+		};
 
 		std::unique_ptr<Texture> out = Create(context, selfDesc);
 		if (!out)
@@ -3824,7 +3915,7 @@ namespace ig
 		uint64_t requiredUploadBufferSize = GetRequiredUploadBufferSize(srcImage, context.GetGraphicsSpecs().bufferPlacementAlignments);
 #endif
 
-		TempBuffer tempBuffer = context.GetUploadHeap().AllocateTempBuffer(requiredUploadBufferSize,
+		TempBuffer tempBuffer = context.GetTempBufferAllocator().AllocateTempBuffer(requiredUploadBufferSize,
 			context.GetGraphicsSpecs().bufferPlacementAlignments.texture);
 
 		byte* destPtr = (byte*)tempBuffer.data;
@@ -3886,7 +3977,7 @@ namespace ig
 		uint64_t requiredUploadBufferSize = GetRequiredUploadBufferSize(srcImage, context.GetGraphicsSpecs().bufferPlacementAlignments);
 #endif
 
-		TempBuffer tempBuffer = context.GetUploadHeap().AllocateTempBuffer(requiredUploadBufferSize,
+		TempBuffer tempBuffer = context.GetTempBufferAllocator().AllocateTempBuffer(requiredUploadBufferSize,
 			context.GetGraphicsSpecs().bufferPlacementAlignments.texture);
 
 		byte* destPtr = (byte*)tempBuffer.data;

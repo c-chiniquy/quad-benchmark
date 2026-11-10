@@ -3,13 +3,15 @@
 
 #ifdef IGLO_D3D12
 
+#include <charconv>
+
 namespace ig
 {
 	constexpr D3D_FEATURE_LEVEL d3d12FeatureLevel = D3D_FEATURE_LEVEL_12_1;
 	constexpr DXGI_SWAP_EFFECT d3d12SwapEffect = DXGI_SWAP_EFFECT_FLIP_DISCARD;
 	constexpr UINT d3d12SwapChainFlags = DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT | DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING;
 
-	std::string FeatureLevelToString(D3D_FEATURE_LEVEL featureLevel)
+	static std::string FeatureLevelToString(D3D_FEATURE_LEVEL featureLevel)
 	{
 		uint32_t value = (uint32_t)featureLevel;
 		uint32_t major = (value >> 12) & 0xF;
@@ -17,9 +19,17 @@ namespace ig
 		return ToString(major, "_", minor);
 	}
 
-	std::string D3D12ErrorMsg(const char* functionName, HRESULT hr)
+	// Uses std::to_chars instead of std::format because std::format increases the binary size by ~180 KB.
+	static std::string HResultToString(HRESULT hr)
 	{
-		return ToString(functionName, " returned error code: ", (uint32_t)hr, ".");
+		char buf[10] = { '0', 'x' };
+		char* end = std::to_chars(buf + 2, buf + 10, static_cast<uint32_t>(hr), 16).ptr;
+		return std::string(buf, end);
+	}
+
+	static std::string D3D12ErrorMsg(const char* functionName, HRESULT hr)
+	{
+		return std::string(functionName) + " returned error code: " + HResultToString(hr) + ".";
 	}
 
 	D3D12TextureFilter ToD3D12TextureFilter(TextureFilter filter)
@@ -1848,7 +1858,7 @@ namespace ig
 		return DetailedResult::Success();
 	}
 
-	void UploadHeap::Page::Impl_Free(const IGLOContext& context)
+	void TempBufferAllocator::Page::Impl_Free(const IGLOContext& context)
 	{
 		if (impl.resource)
 		{
@@ -1857,7 +1867,7 @@ namespace ig
 		}
 	}
 
-	UploadHeap::Page UploadHeap::Page::Create(const IGLOContext& context, uint64_t sizeInBytes)
+	TempBufferAllocator::Page TempBufferAllocator::Page::Create(const IGLOContext& context, uint64_t sizeInBytes)
 	{
 		Page out;
 
@@ -1889,11 +1899,11 @@ namespace ig
 
 		HRESULT hr = context.GetD3D12Device()->CreateCommittedResource3(&heapProp, D3D12_HEAP_FLAG_NONE, &desc, barrierLayout,
 			nullptr, nullptr, 0, nullptr, IID_PPV_ARGS(&out.impl.resource));
-		if (FAILED(hr)) Fatal(ToString("Failed to create upload heap buffer with size ", sizeInBytes, "."));
+		if (FAILED(hr)) Fatal(ToString("Failed to create temp buffer page with size ", sizeInBytes, "."));
 
 		D3D12_RANGE noRead = { 0, 0 };
 		hr = out.impl.resource->Map(0, &noRead, &out.mapped);
-		if (FAILED(hr)) Fatal(ToString("Failed to map upload heap buffer with size ", sizeInBytes, "."));
+		if (FAILED(hr)) Fatal(ToString("Failed to map temp buffer page with size ", sizeInBytes, "."));
 
 		out.sizeInBytes = sizeInBytes;
 		return out;
@@ -2094,19 +2104,22 @@ namespace ig
 		}
 	}
 
-	VideoMemoryInfo IGLOContext::QueryVideoMemoryInfo()
+	std::optional<VideoMemoryInfo> IGLOContext::QueryVideoMemoryInfo() const
 	{
 		ComPtr<IDXGIAdapter3> adapter3;
-		graphics.adapter.As(&adapter3);
+		HRESULT hr = graphics.adapter.As(&adapter3);
+		if (FAILED(hr)) return std::nullopt;
 
 		DXGI_QUERY_VIDEO_MEMORY_INFO info = {};
-		adapter3->QueryVideoMemoryInfo(0, DXGI_MEMORY_SEGMENT_GROUP_LOCAL, &info);
+		hr = adapter3->QueryVideoMemoryInfo(0, DXGI_MEMORY_SEGMENT_GROUP_LOCAL, &info);
+		if (FAILED(hr)) return std::nullopt;
 
-		VideoMemoryInfo out;
-		out.totalVRAM = info.Budget;
-		out.usedVRAM = info.CurrentUsage;
-		out.availableVRAM = info.Budget - info.CurrentUsage;
-		return out;
+		return VideoMemoryInfo
+		{
+			.budgetVRAM = info.Budget,
+			.usedVRAM = info.CurrentUsage,
+			.availableVRAM = (info.Budget > info.CurrentUsage) ? info.Budget - info.CurrentUsage : 0,
+		};
 	}
 
 	uint32_t IGLOContext::Impl_GetMaxMSAA(Format textureFormat) const
@@ -2243,7 +2256,7 @@ namespace ig
 			window.hwnd, &swapChainDesc, nullptr, nullptr, &swapChain1);
 		if (FAILED(hr))
 		{
-			return DetailedResult::Fail(D3D12ErrorMsg("ID3D12Device::CreateSwapChainForHwnd", hr));
+			return DetailedResult::Fail(D3D12ErrorMsg("IDXGIFactory2::CreateSwapChainForHwnd", hr));
 		}
 		hr = swapChain1.As(&graphics.swapChain);
 		if (FAILED(hr))

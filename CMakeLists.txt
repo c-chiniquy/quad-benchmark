@@ -15,7 +15,7 @@ set(PROJECT_SOURCES
 )
 
 # iglo
-set(IGLO_INCLUDE_DIR "${CMAKE_SOURCE_DIR}/extern/iglo-0.8.0")
+set(IGLO_INCLUDE_DIR "${CMAKE_SOURCE_DIR}/extern/iglo-0.9.2")
 set(IGLO_SOURCES
     ${IGLO_INCLUDE_DIR}/iglo.h
     ${IGLO_INCLUDE_DIR}/iglo.cpp
@@ -124,6 +124,8 @@ endif()
 add_executable(${name} ${PROJECT_SOURCES} ${IGLO_SOURCES})
 
 if(MSVC)
+    # enable multi-processor compilation
+    target_compile_options(${name} PRIVATE /MP)
     # set linker subsystem
     target_link_options(${name} PRIVATE "/SUBSYSTEM:CONSOLE")
     # no filter for project source files

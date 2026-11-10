@@ -1,10 +1,10 @@
 
 #include "iglo.h"
-#include <set>
-#include <unordered_map>
-
 
 #ifdef IGLO_VULKAN
+
+#include <set>
+#include <unordered_map>
 
 #include <vulkan/vulkan.hpp>
 
@@ -12,12 +12,12 @@ constexpr uint32_t vulkanVersion = VK_API_VERSION_1_3;
 
 namespace ig
 {
-	std::string VulkanErrorMsg(const char* functionName, VkResult result)
+	static std::string VulkanErrorMsg(const char* functionName, VkResult result)
 	{
 		return ToString(functionName, " returned result: ", vk::to_string(vk::Result(result)), ".");
 	}
 
-	VkResult CreateDebugUtilsMessengerEXT(VkInstance instance, const VkDebugUtilsMessengerCreateInfoEXT* pCreateInfo,
+	static VkResult CreateDebugUtilsMessengerEXT(VkInstance instance, const VkDebugUtilsMessengerCreateInfoEXT* pCreateInfo,
 		const VkAllocationCallbacks* pAllocator, VkDebugUtilsMessengerEXT* pDebugMessenger)
 	{
 		auto func = (PFN_vkCreateDebugUtilsMessengerEXT)vkGetInstanceProcAddr(instance, "vkCreateDebugUtilsMessengerEXT");
@@ -31,40 +31,25 @@ namespace ig
 		}
 	}
 
-	void DestroyDebugUtilsMessengerEXT(VkInstance instance, VkDebugUtilsMessengerEXT debugMessenger, const VkAllocationCallbacks* pAllocator)
+	static void DestroyDebugUtilsMessengerEXT(VkInstance instance, VkDebugUtilsMessengerEXT debugMessenger, const VkAllocationCallbacks* pAllocator)
 	{
 		auto func = (PFN_vkDestroyDebugUtilsMessengerEXT)vkGetInstanceProcAddr(instance, "vkDestroyDebugUtilsMessengerEXT");
 		if (func) func(instance, debugMessenger, pAllocator);
 	}
 
-	VKAPI_ATTR VkBool32 VKAPI_CALL VulkanDebugCallback(VkDebugUtilsMessageSeverityFlagBitsEXT messageSeverity,
+	static VKAPI_ATTR VkBool32 VKAPI_CALL VulkanDebugCallback(VkDebugUtilsMessageSeverityFlagBitsEXT messageSeverity,
 		VkDebugUtilsMessageTypeFlagsEXT messageTypes, const VkDebugUtilsMessengerCallbackDataEXT* pCallbackData, void* pUserData)
 	{
 		if (messageSeverity >= VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT)
 		{
-			Print(ToString("Vulkan: ", pCallbackData->pMessage, "\n"));
+			const char* typeStr = (messageSeverity >= VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT) ? "error" : "warning";
+			Print(ToString("Vulkan ", typeStr, ": ", pCallbackData->pMessage, "\n"));
 		}
 
 		return VK_FALSE;
 	}
 
-	std::optional<uint32_t> FindVulkanMemoryType(VkPhysicalDevice physicalDevice, uint32_t typeFilter, VkMemoryPropertyFlags properties)
-	{
-		VkPhysicalDeviceMemoryProperties memProps;
-		vkGetPhysicalDeviceMemoryProperties(physicalDevice, &memProps);
-
-		for (uint32_t i = 0; i < memProps.memoryTypeCount; i++)
-		{
-			if ((typeFilter & (1 << i)) && (memProps.memoryTypes[i].propertyFlags & properties) == properties)
-			{
-				return i;
-			}
-		}
-
-		return std::nullopt;
-	}
-
-	bool IsMemoryBudgetSupported(VkPhysicalDevice physicalDevice)
+	static bool IsMemoryBudgetSupported(VkPhysicalDevice physicalDevice)
 	{
 		uint32_t extensionCount = 0;
 		vkEnumerateDeviceExtensionProperties(physicalDevice, nullptr, &extensionCount, nullptr);
@@ -80,6 +65,22 @@ namespace ig
 			}
 		}
 		return false;
+	}
+
+	std::optional<uint32_t> FindVulkanMemoryType(VkPhysicalDevice physicalDevice, uint32_t typeFilter, VkMemoryPropertyFlags properties)
+	{
+		VkPhysicalDeviceMemoryProperties memProps;
+		vkGetPhysicalDeviceMemoryProperties(physicalDevice, &memProps);
+
+		for (uint32_t i = 0; i < memProps.memoryTypeCount; i++)
+		{
+			if ((typeFilter & (1u << i)) && (memProps.memoryTypes[i].propertyFlags & properties) == properties)
+			{
+				return i;
+			}
+		}
+
+		return std::nullopt;
 	}
 
 	DetailedResult IsVulkanPhysicalDeviceSuitable(VkPhysicalDevice physicalDevice, VkSurfaceKHR surface,
@@ -2373,7 +2374,7 @@ namespace ig
 			1, &resolveRegion);
 	}
 
-	void UploadHeap::Page::Impl_Free(const IGLOContext& context)
+	void TempBufferAllocator::Page::Impl_Free(const IGLOContext& context)
 	{
 		if (impl.memory) vkUnmapMemory(context.GetVulkanDevice(), impl.memory);
 		if (impl.buffer) vkDestroyBuffer(context.GetVulkanDevice(), impl.buffer, nullptr);
@@ -2382,7 +2383,7 @@ namespace ig
 		impl.memory = VK_NULL_HANDLE;
 	}
 
-	UploadHeap::Page UploadHeap::Page::Create(const IGLOContext& context, uint64_t sizeInBytes)
+	TempBufferAllocator::Page TempBufferAllocator::Page::Create(const IGLOContext& context, uint64_t sizeInBytes)
 	{
 		Page out;
 		VkDevice device = context.GetVulkanDevice();
@@ -2401,7 +2402,7 @@ namespace ig
 		bufferInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
 
 		VkResult result = vkCreateBuffer(device, &bufferInfo, nullptr, &out.impl.buffer);
-		if (result != VK_SUCCESS) Fatal(ToString("Failed to create upload heap buffer with size ", sizeInBytes, "."));
+		if (result != VK_SUCCESS) Fatal(ToString("Failed to create temp buffer page with size ", sizeInBytes, "."));
 
 		VkMemoryRequirements memReq = {};
 		vkGetBufferMemoryRequirements(device, out.impl.buffer, &memReq);
@@ -2414,7 +2415,7 @@ namespace ig
 		if (!memTypeIndex.has_value())
 		{
 			vkDestroyBuffer(device, out.impl.buffer, nullptr);
-			Fatal(ToString("Failed to FindVulkanMemoryType of upload heap buffer with size ", sizeInBytes, "."));
+			Fatal(ToString("Failed to FindVulkanMemoryType for temp buffer page with size ", sizeInBytes, "."));
 		}
 
 		VkMemoryAllocateInfo allocInfo = {};
@@ -2426,7 +2427,7 @@ namespace ig
 		if (result != VK_SUCCESS)
 		{
 			vkDestroyBuffer(device, out.impl.buffer, nullptr);
-			Fatal(ToString("Failed to allocate memory of upload heap buffer with size ", sizeInBytes, "."));
+			Fatal(ToString("Failed to allocate memory for temp buffer page with size ", sizeInBytes, "."));
 		}
 
 		result = vkBindBufferMemory(device, out.impl.buffer, out.impl.memory, 0);
@@ -2434,7 +2435,7 @@ namespace ig
 		{
 			vkDestroyBuffer(device, out.impl.buffer, nullptr);
 			vkFreeMemory(device, out.impl.memory, nullptr);
-			Fatal(ToString("Failed to bind memory of upload heap buffer with size ", sizeInBytes, "."));
+			Fatal(ToString("Failed to bind memory to temp buffer page with size ", sizeInBytes, "."));
 		}
 
 		result = vkMapMemory(device, out.impl.memory, 0, sizeInBytes, 0, &out.mapped);
@@ -2442,7 +2443,7 @@ namespace ig
 		{
 			vkDestroyBuffer(device, out.impl.buffer, nullptr);
 			vkFreeMemory(device, out.impl.memory, nullptr);
-			Fatal(ToString("Failed to map memory of upload heap buffer with size ", sizeInBytes, "."));
+			Fatal(ToString("Failed to map memory of temp buffer page with size ", sizeInBytes, "."));
 		}
 
 		out.sizeInBytes = sizeInBytes;
@@ -3114,52 +3115,34 @@ namespace ig
 		return DetailedResult::Success();
 	}
 
-	VideoMemoryInfo IGLOContext::QueryVideoMemoryInfo()
+	std::optional<VideoMemoryInfo> IGLOContext::QueryVideoMemoryInfo() const
 	{
-		VideoMemoryInfo out;
+		if (!graphics.usesMemoryBudgetExt) return std::nullopt;
 
-		if (graphics.usesMemoryBudgetExt)
+		VkPhysicalDeviceMemoryBudgetPropertiesEXT budget = {};
+		budget.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MEMORY_BUDGET_PROPERTIES_EXT;
+
+		VkPhysicalDeviceMemoryProperties2 props = {};
+		props.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MEMORY_PROPERTIES_2;
+		props.pNext = &budget;
+
+		vkGetPhysicalDeviceMemoryProperties2(graphics.physicalDevice, &props);
+
+		for (uint32_t i = 0; i < props.memoryProperties.memoryHeapCount; i++)
 		{
-			VkPhysicalDeviceMemoryBudgetPropertiesEXT budget = {};
-			budget.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MEMORY_BUDGET_PROPERTIES_EXT;
-
-			VkPhysicalDeviceMemoryProperties2 props = {};
-			props.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MEMORY_PROPERTIES_2;
-			props.pNext = &budget;
-
-			vkGetPhysicalDeviceMemoryProperties2(graphics.physicalDevice, &props);
-
-			// Iterate heaps to find the first device-local heap
-			for (uint32_t i = 0; i < props.memoryProperties.memoryHeapCount; i++)
+			if (props.memoryProperties.memoryHeaps[i].flags & VK_MEMORY_HEAP_DEVICE_LOCAL_BIT)
 			{
-				if (props.memoryProperties.memoryHeaps[i].flags & VK_MEMORY_HEAP_DEVICE_LOCAL_BIT)
+				const uint64_t heapBudget = budget.heapBudget[i];
+				const uint64_t heapUsage = budget.heapUsage[i];
+				return VideoMemoryInfo
 				{
-					out.totalVRAM = props.memoryProperties.memoryHeaps[i].size;
-					out.usedVRAM = budget.heapUsage[i];
-					out.availableVRAM = budget.heapBudget[i];
-					break;
-				}
+					.budgetVRAM = heapBudget,
+					.usedVRAM = heapUsage,
+					.availableVRAM = (heapBudget > heapUsage) ? heapBudget - heapUsage : 0,
+				};
 			}
 		}
-		else
-		{
-			// No memory budget extension
-			VkPhysicalDeviceMemoryProperties memProps;
-			vkGetPhysicalDeviceMemoryProperties(graphics.physicalDevice, &memProps);
-
-			for (uint32_t i = 0; i < memProps.memoryHeapCount; i++)
-			{
-				if (memProps.memoryHeaps[i].flags & VK_MEMORY_HEAP_DEVICE_LOCAL_BIT)
-				{
-					out.totalVRAM = memProps.memoryHeaps[i].size;
-					out.usedVRAM = std::nullopt; // unknown
-					out.availableVRAM = std::nullopt; // unknown
-					break;
-				}
-			}
-		}
-
-		return out;
+		return std::nullopt; // No device-local heap found
 	}
 
 	uint32_t IGLOContext::Impl_GetMaxMSAA(Format textureFormat) const
